@@ -318,9 +318,13 @@
   // Particle pool — supports trails, varying gravity, optional secondary
   // detonation (for 千輪).
   // -------------------------------------------------------------------------
-  // Raised from 700 → 1100 so a huge-ball detonation (380-540 particles)
-  // can land without starving normal concurrent bursts of their budget.
-  const MAX_PARTICLES = 1100;
+  // Soft cap — spawn functions ignore this and always allocate their full
+  // requested count, so a hand sweeping through 10+ balls in one frame
+  // guarantees 10 fully-rendered detonations. The cap is enforced lazily
+  // once per frame at the END of updateParticles by sorting the array
+  // and evicting the dimmest oldest particles first. That way, overlapping
+  // bursts always look right; the cap only kicks in for sustained chaos.
+  const MAX_PARTICLES = 2500;
   const particlePool = [];
   const particles = [];
   function getParticle() { return particlePool.pop() || {}; }
@@ -357,7 +361,7 @@
     const want = huge
       ? 360 + Math.floor(Math.random() * 140) // 360-500
       : 95  + Math.floor(Math.random() * 35);
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.35;
@@ -388,7 +392,7 @@
     const want = huge
       ? 380 + Math.floor(Math.random() * 140) // 380-520
       : 110 + Math.floor(Math.random() * 40);
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.25;
@@ -415,7 +419,7 @@
   // 柳 — drooping golden trails, heavy gravity, long persistence
   function spawnWillow(x, y) {
     const want = 65 + Math.floor(Math.random() * 25);
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     for (let i = 0; i < n; i++) {
       // Bias initial trajectories upward-and-outward (cone around -π/2)
       const spread = Math.PI * 1.1;
@@ -443,7 +447,7 @@
   // 椰子 — palm-tree: a small number of THICK arcing streamers
   function spawnPalm(x, y) {
     const want = 9 + Math.floor(Math.random() * 4); // 9-12 streamers
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     const base = pickFrom(PAL_ORANGERED);
     for (let i = 0; i < n; i++) {
       const t = i / Math.max(1, n - 1); // 0..1 across the fan
@@ -471,7 +475,7 @@
   // 千輪 — primary sparks that detonate again after a short lifetime
   function spawnSenrin(x, y) {
     const want = 18 + Math.floor(Math.random() * 7);
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.2;
       const speed = 150 + Math.random() * 80;
@@ -499,8 +503,7 @@
   // Secondary sub-burst when a 千輪 primary expires
   function spawnSubBurst(x, y, baseColor) {
     const want = 9 + Math.floor(Math.random() * 5);
-    const room = MAX_PARTICLES - particles.length;
-    const n = Math.min(want, room);
+    const n = want; // cap enforced lazily in updateParticles
     for (let i = 0; i < n; i++) {
       const angle = Math.random() * Math.PI * 2;
       const speed = 55 + Math.random() * 90;
@@ -524,11 +527,9 @@
 
   // 二段咲 — outer ring + inner ring, both spherical, two colors
   function spawnTwostage(x, y) {
-    const room = MAX_PARTICLES - particles.length;
-    const outerWant = 65;
-    const innerWant = 55;
-    const outerN = Math.min(outerWant, Math.floor(room * 0.55));
-    const innerN = Math.min(innerWant, room - outerN);
+    // No per-spawn cap; updateParticles evicts oldest if we exceed.
+    const outerN = 65;
+    const innerN = 55;
     const outerC = pickFrom(PAL_REDGOLD); // most often a red
     const innerC = { r: 255, g: 220, b: 130 }; // gold core
 
@@ -582,7 +583,7 @@
   //   behind the trails stays luminous for ~1s — the signature droop.
   function spawnShidare(x, y) {
     const want = 38 + Math.floor(Math.random() * 11); // 38-48
-    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const n = want; // cap enforced lazily in updateParticles, not here
     const coneSpread = Math.PI * 0.65; // ~117° total
     for (let i = 0; i < n; i++) {
       const angle = -Math.PI / 2 + (Math.random() - 0.5) * coneSpread;
@@ -733,6 +734,19 @@
         releaseParticle(p);
         particles.splice(i, 1);
       }
+    }
+
+    // Lazy cap enforcement. Spawn functions allocate their full requested
+    // count regardless of MAX_PARTICLES, so a multi-ball hand sweep is
+    // guaranteed to fire every burst. If we've blown past the cap, sort
+    // by remaining life (ascending) and evict the dimmest particles. They
+    // would have died within a frame or two anyway — visually negligible.
+    // 'lighter' compositing is order-independent so sorting is safe.
+    if (particles.length > MAX_PARTICLES) {
+      particles.sort((a, b) => a.life - b.life);
+      const excess = particles.length - MAX_PARTICLES;
+      for (let i = 0; i < excess; i++) releaseParticle(particles[i]);
+      particles.splice(0, excess);
     }
   }
 
