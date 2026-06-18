@@ -272,12 +272,13 @@
   // Firework styles
   // -------------------------------------------------------------------------
   const STYLE_WEIGHTS = [
-    ['chrysanthemum', 0.24],
-    ['peony',         0.22],
-    ['willow',        0.16],
-    ['palm',          0.14],
-    ['senrin',        0.13],
-    ['twostage',      0.11],
+    ['chrysanthemum', 0.22],
+    ['peony',         0.20],
+    ['willow',        0.14],
+    ['palm',          0.13],
+    ['senrin',        0.11],
+    ['twostage',      0.10],
+    ['shidare',       0.10], // しだれ柳 — long-trail weeping willow
   ];
   function pickStyle() {
     const r = Math.random();
@@ -504,6 +505,105 @@
     }
   }
 
+  // しだれ柳 — long-trail weeping willow. ~10% of detonations.
+  // - Dense narrow upward cone (38-48 particles, ~117° spread).
+  // - 3.6-5.0s lifetime; gravity 50 (vs typical 220) so they hang.
+  // - Per-particle wind so trails curve gently instead of being straight.
+  // - Color cycles white-hot → gold → deep amber across lifetime, driven
+  //   at draw time by shidareColorFor(life).
+  // - Each particle drops a slow-fading "ghost" every ~0.13s, so the air
+  //   behind the trails stays luminous for ~1s — the signature droop.
+  function spawnShidare(x, y) {
+    const want = 38 + Math.floor(Math.random() * 11); // 38-48
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const coneSpread = Math.PI * 0.65; // ~117° total
+    for (let i = 0; i < n; i++) {
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * coneSpread;
+      const speed = 170 + Math.random() * 100; // 170-270 px/s
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      // Base color stored as gold; shidareColorFor overrides at draw time.
+      p.r = 255; p.g = 200; p.b = 87;
+      p.life = 1.0;
+      p.maxLife = 3.6 + Math.random() * 1.4; // 3.6-5.0s
+      p.size = 1.2 + Math.random() * 0.5;
+      p.drag = 0.994;
+      p.glow = 0.65 + Math.random() * 0.25;
+      p.gravity = 50;
+      p.trail = true;
+      p.trailWidth = 2.4 + Math.random() * 0.5; // line ≈ 3-4 px
+      p.detonate = false;
+      p.colorMode = 'shidare';
+      p.windOffset = (Math.random() - 0.5) * 12; // ±6 px/s² per-particle wind
+      p.ghostTimer = 0;
+      particles.push(p);
+    }
+  }
+
+  // Color sequence used by shidare across particle life (1 = fresh, 0 = dead):
+  //   life > 0.85 → white-hot fading to gold (the bright flash at peak)
+  //   life > 0.30 → pure gold body
+  //   life ≤ 0.30 → gold sinking to deep amber as they descend
+  function shidareColorFor(life) {
+    const lf = life < 0 ? 0 : life > 1 ? 1 : life;
+    if (lf > 0.85) {
+      const k = (lf - 0.85) / 0.15;
+      return { r: 255, g: 200 + 50 * k, b: 87 + 168 * k };
+    }
+    if (lf > 0.30) {
+      return { r: 255, g: 200, b: 87 };
+    }
+    const k = lf / 0.30;
+    return {
+      r: 180 + 75 * k, // 180 → 255
+      g:  90 + 110 * k, //  90 → 200
+      b:  20 +  67 * k, //  20 →  87
+    };
+  }
+
+  // Ghost trail puffs left behind shidare particles
+  const shidareGhosts = [];
+  const MAX_GHOSTS = 500;
+  function spawnGhost(x, y, color, size) {
+    shidareGhosts.push({
+      x, y,
+      life: 1,
+      maxLife: 0.8 + Math.random() * 0.3,
+      r: color.r, g: color.g, b: color.b,
+      size,
+    });
+    if (shidareGhosts.length > MAX_GHOSTS) shidareGhosts.shift();
+  }
+  function updateGhosts(dt) {
+    for (let i = shidareGhosts.length - 1; i >= 0; i--) {
+      const g = shidareGhosts[i];
+      g.life -= dt / g.maxLife;
+      if (g.life <= 0) shidareGhosts.splice(i, 1);
+    }
+  }
+  function drawGhosts() {
+    if (shidareGhosts.length === 0) return;
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    for (let i = 0; i < shidareGhosts.length; i++) {
+      const g = shidareGhosts[i];
+      const a = Math.max(0, g.life);
+      const fade = a * a * 0.4;
+      if (fade < 0.01) continue;
+      const r = g.size * 2.6;
+      const grad = ctx.createRadialGradient(g.x, g.y, 0, g.x, g.y, r);
+      grad.addColorStop(0, `rgba(${g.r|0},${g.g|0},${g.b|0},${fade})`);
+      grad.addColorStop(1, `rgba(${g.r|0},${g.g|0},${g.b|0},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(g.x, g.y, r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.restore();
+  }
+
   // -------------------------------------------------------------------------
   // The detonation dispatcher
   // -------------------------------------------------------------------------
@@ -516,6 +616,7 @@
       case 'palm':          spawnPalm(x, y);          break;
       case 'senrin':        spawnSenrin(x, y);        break;
       case 'twostage':      spawnTwostage(x, y);      break;
+      case 'shidare':       spawnShidare(x, y);       break;
     }
     spawnSmoke(x, y);
     spawnFlash();
@@ -531,6 +632,17 @@
       const p = particles[i];
       p.trailX = p.x;
       p.trailY = p.y;
+
+      // Shidare-only extras: gentle horizontal wind + dropped ghost puffs
+      if (p.colorMode === 'shidare') {
+        p.vx += p.windOffset * dt;
+        p.ghostTimer += dt;
+        if (p.ghostTimer >= 0.13) {
+          p.ghostTimer = 0;
+          spawnGhost(p.x, p.y, shidareColorFor(p.life), p.size);
+        }
+      }
+
       p.x += p.vx * dt;
       p.y += p.vy * dt;
       p.vy += (p.gravity || 220) * dt;
@@ -554,8 +666,17 @@
       const a = Math.max(0, p.life);
       const fade = a * a;
 
+      // Shidare colors evolve with life — white-hot → gold → amber.
+      let pr, pg, pb;
+      if (p.colorMode === 'shidare') {
+        const c = shidareColorFor(p.life);
+        pr = c.r; pg = c.g; pb = c.b;
+      } else {
+        pr = p.r; pg = p.g; pb = p.b;
+      }
+
       if (p.trail) {
-        ctx.strokeStyle = `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.6})`;
+        ctx.strokeStyle = `rgba(${pr|0},${pg|0},${pb|0},${fade * 0.6})`;
         ctx.lineWidth = p.size * (p.trailWidth || 1);
         ctx.beginPath();
         ctx.moveTo(p.trailX, p.trailY);
@@ -564,7 +685,7 @@
       }
 
       const sz = p.size * (1.2 + fade * 0.6);
-      ctx.fillStyle = `rgba(${p.r|0},${p.g|0},${p.b|0},${fade})`;
+      ctx.fillStyle = `rgba(${pr|0},${pg|0},${pb|0},${fade})`;
       ctx.beginPath();
       ctx.arc(p.x, p.y, sz, 0, Math.PI * 2);
       ctx.fill();
@@ -572,8 +693,8 @@
       if (fade > 0.05) {
         const haloR = sz * 4 * p.glow;
         const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, haloR);
-        grad.addColorStop(0, `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.5})`);
-        grad.addColorStop(1, `rgba(${p.r|0},${p.g|0},${p.b|0},0)`);
+        grad.addColorStop(0, `rgba(${pr|0},${pg|0},${pb|0},${fade * 0.5})`);
+        grad.addColorStop(1, `rgba(${pr|0},${pg|0},${pb|0},0)`);
         ctx.fillStyle = grad;
         ctx.beginPath();
         ctx.arc(p.x, p.y, haloR, 0, Math.PI * 2);
@@ -1357,6 +1478,7 @@
     for (let i = lanterns.length - 1; i >= 0; i--) if (lanterns[i].dead) lanterns.splice(i, 1);
 
     updateParticles(dt);
+    updateGhosts(dt);
     updateSmoke(dt);
 
     for (const c of chars) c.update(dt);
@@ -1369,6 +1491,7 @@
     for (const l of lanterns) l.draw();
     for (const s of seeds) s.draw(now * 0.001);
     drawSmoke();
+    drawGhosts();    // shidare lingering glow trails (sit under bright heads)
     drawParticles();
     drawHandGlow(now);
     drawMouseCursor(now);
