@@ -1280,7 +1280,7 @@
   const OPEN_PALM_MIN      = 4;    // fingers extended required for "palm"
   const PINCH_PALM_FRACTION = 0.40; // pinch if dist(4,8) < this * palmWidth
   const PINCH_MIN_PX        = 50;  // ...or this many screen pixels
-  const HUGE_CHARGE_SECONDS = 5.0; // sustained pinch duration to spawn huge
+  const HUGE_CHARGE_SECONDS = 3.0; // sustained pinch duration to spawn huge
 
   // Per-slot persistent state across MediaPipe frames. Index 0 / 1 follow
   // results.multiHandLandmarks order. If a slot disappears (hand removed),
@@ -1484,10 +1484,10 @@
         ctx.arc(pp.x, pp.y, r, 0, Math.PI * 2);
         ctx.fill();
 
-        // Charging aura — fades in around 2s, intensifies until 5s.
-        // chargeT goes 0..1 across the 5-second hold; visibility starts at
-        // chargeT≈0.4 (≈2s) so the first half feels like a normal pinch.
-        const visibility = Math.max(0, (h.chargeT - 0.3) / 0.7);
+        // Charging aura — fades in at the halfway point of the 3-second
+        // hold (so the first ~1.5s feels like a normal pinch), then ramps
+        // smoothly to full intensity at the 3s spawn moment.
+        const visibility = Math.max(0, (h.chargeT - 0.5) / 0.5);
         if (visibility > 0) {
           const auraR = 30 + 110 * visibility;
           const auraPulse = 0.7 + 0.3 * Math.sin(now * (0.005 + 0.015 * visibility));
