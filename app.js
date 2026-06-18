@@ -1,12 +1,20 @@
 // 幫你放煙火 · Wave to Spark Fireworks
-// Canvas 2D fireworks + MediaPipe Hands gesture tracking + WebAudio synthesis.
+// Canvas 2D fireworks + MediaPipe Hands whole-hand collision + WebAudio.
+//
+// Layering (back → front):
+//   <video>  fullscreen webcam, mirrored                       z-index 0
+//   <canvas> translucent night-sky overlay + fireworks         z-index 1
+//   title / hint / message DOM overlays                       z-index 10+
+//
+// Collision: convex hull of all 21 hand landmarks per detected hand. Any
+// seed whose center lies inside the (slightly inflated) hull detonates.
 
 (() => {
   // -------------------------------------------------------------------------
   // Setup
   // -------------------------------------------------------------------------
   const canvas = document.getElementById('canvas');
-  const ctx = canvas.getContext('2d', { alpha: false });
+  const ctx = canvas.getContext('2d'); // alpha=true (default) so webcam shows
   const video = document.getElementById('video');
   const messageEl = document.getElementById('message');
   const hintEl = document.getElementById('hint');
@@ -29,7 +37,7 @@
   hintEl.textContent = isMobile ? hintEl.dataset.mobile : hintEl.dataset.desktop;
 
   // -------------------------------------------------------------------------
-  // Palette — auspicious Lunar New Year colors
+  // Color palettes
   // -------------------------------------------------------------------------
   const PALETTE = [
     { r: 212, g: 0,   b: 0   }, // deep red
@@ -37,25 +45,6 @@
     { r: 255, g: 107, b: 53  }, // orange
     { r: 255, g: 71,  b: 126 }, // pink
   ];
-
-  // Ember palette used by detonations — mostly orange + deep red, occasional
-  // yellow highlight. Drives a "real fire" look rather than rainbow sparks.
-  const EMBER_PALETTE = [
-    { r: 255, g: 222, b: 110, weight: 0.10 }, // yellow highlight
-    { r: 255, g: 175, b:  80, weight: 0.32 }, // bright orange
-    { r: 255, g: 107, b:  53, weight: 0.32 }, // base orange
-    { r: 220, g:  70, b:  30, weight: 0.20 }, // red-orange
-    { r: 212, g:   0, b:   0, weight: 0.06 }, // deep red
-  ];
-  function pickEmber() {
-    const r = Math.random();
-    let acc = 0;
-    for (const c of EMBER_PALETTE) {
-      acc += c.weight;
-      if (r < acc) return c;
-    }
-    return EMBER_PALETTE[2];
-  }
   function paletteAt(t) {
     const len = PALETTE.length;
     const f = ((t % 1) + 1) % 1 * len;
@@ -71,13 +60,53 @@
   }
   const rgba = (c, a) => `rgba(${c.r|0},${c.g|0},${c.b|0},${a})`;
 
+  // Per-style firework palettes (selected by spawn* functions).
+  const PAL_REDGOLD = [
+    { r: 212, g:   0, b:   0 }, // red
+    { r: 255, g: 200, b:  87 }, // gold
+    { r: 255, g: 165, b:  80 },
+    { r: 255, g:  71, b: 126 }, // pink
+    { r: 230, g:  50, b:  90 },
+  ];
+  const PAL_GOLD = [
+    { r: 255, g: 200, b:  87 },
+    { r: 255, g: 220, b: 130 },
+    { r: 230, g: 165, b:  60 },
+    { r: 255, g: 175, b:  70 },
+  ];
+  const PAL_MULTI = [
+    { r: 212, g:   0, b:   0 },
+    { r: 255, g: 200, b:  87 },
+    { r: 255, g: 107, b:  53 },
+    { r: 255, g:  71, b: 126 },
+    { r: 100, g: 180, b: 255 },
+    { r: 180, g: 100, b: 255 },
+    { r: 100, g: 230, b: 130 },
+  ];
+  const PAL_ORANGERED = [
+    { r: 255, g: 107, b:  53 },
+    { r: 220, g:  70, b:  30 },
+    { r: 212, g:   0, b:   0 },
+    { r: 255, g: 165, b:  80 },
+  ];
+
+  function pickFrom(arr) { return arr[Math.floor(Math.random() * arr.length)]; }
+  function jitter(c, amount) {
+    return {
+      r: clamp(c.r + (Math.random() - 0.5) * amount, 30, 255),
+      g: clamp(c.g + (Math.random() - 0.5) * amount, 20, 255),
+      b: clamp(c.b + (Math.random() - 0.5) * amount, 0,  255),
+    };
+  }
+  function clamp(v, lo, hi) { return v < lo ? lo : v > hi ? hi : v; }
+
   // -------------------------------------------------------------------------
-  // Stars
+  // Stars (subtle twinkle through the night-sky overlay)
   // -------------------------------------------------------------------------
   const stars = [];
   function buildStars() {
     stars.length = 0;
-    const count = Math.floor((W * H) / 8000);
+    const count = Math.floor((W * H) / 12000);
     for (let i = 0; i < count; i++) {
       stars.push({
         x: Math.random() * W,
@@ -93,7 +122,7 @@
   window.addEventListener('resize', buildStars);
 
   // -------------------------------------------------------------------------
-  // Seeds — falling fireworks waiting to detonate
+  // Falling firework balls (Seeds)
   // -------------------------------------------------------------------------
   const seeds = [];
 
@@ -101,9 +130,9 @@
     constructor() {
       this.x = 30 + Math.random() * (W - 60);
       this.y = -20 - Math.random() * 80;
-      this.vy = 18 + Math.random() * 24; // 18-42 px/s
+      this.vy = 18 + Math.random() * 24;
       this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-      this.r = 8 + Math.random() * 4; // core radius 8-12 → ball diameter 16-24
+      this.r = 8 + Math.random() * 4; // diameter 16-24
       this.phase = Math.random() * Math.PI * 2;
       this.swayAmp = 6 + Math.random() * 14;
       this.swayFreq = 0.4 + Math.random() * 0.5;
@@ -112,7 +141,6 @@
     }
     update(dt, now) {
       this.y += this.vy * dt;
-      // gentle horizontal sway (in addition to base position drift)
       this.x += Math.cos((now - this.t0) * this.swayFreq + this.phase) * this.swayAmp * dt;
       if (this.y > H + 40 || this.x < -40 || this.x > W + 40) this.alive = false;
     }
@@ -123,7 +151,7 @@
       const c = this.color;
       const x = this.x, y = this.y;
 
-      // Soft cast shadow beneath the ball (flattened ellipse, normal alpha)
+      // Cast shadow beneath
       const sy = y + r * 0.7;
       const sg = ctx.createRadialGradient(x, sy, 0, x, sy, r * 1.45);
       sg.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
@@ -133,7 +161,7 @@
       ctx.ellipse(x, sy, r * 1.45, r * 0.5, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Warm outer halo (additive so colors stack with sky)
+      // Warm outer halo (additive)
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       const haloR = r * 2.6;
@@ -147,7 +175,7 @@
       ctx.fill();
       ctx.restore();
 
-      // Sphere body — radial gradient centered up-left for 3D shading
+      // 3D sphere body — light source upper-left
       const lightX = x - r * 0.42;
       const lightY = y - r * 0.42;
       const dark   = { r: c.r * 0.22, g: c.g * 0.22, b: c.b * 0.22 };
@@ -166,7 +194,7 @@
       ctx.arc(x, y, r, 0, Math.PI * 2);
       ctx.fill();
 
-      // Specular highlight near the light source
+      // Specular highlight
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
       const spx = x - r * 0.42, spy = y - r * 0.48;
@@ -184,62 +212,281 @@
   }
 
   function spawnSeeds(dt) {
-    // Target rate: ~2-3 seeds per second, capped at 28 simultaneous.
-    const rate = 2.4;
-    if (seeds.length < 28 && Math.random() < rate * dt) {
+    if (seeds.length < 28 && Math.random() < 2.4 * dt) {
       seeds.push(new Seed());
     }
   }
 
   // -------------------------------------------------------------------------
-  // Particle system (object-pooled sparks)
+  // Particle pool — supports trails, varying gravity, optional secondary
+  // detonation (for 千輪).
   // -------------------------------------------------------------------------
-  const MAX_PARTICLES = 600;
+  const MAX_PARTICLES = 700;
   const particlePool = [];
   const particles = [];
-
-  function getParticle() {
-    return particlePool.pop() || {};
-  }
+  function getParticle() { return particlePool.pop() || {}; }
   function releaseParticle(p) {
     if (particlePool.length < 1200) particlePool.push(p);
   }
 
-  function explode(x, y /* color unused — fireballs are always ember */) {
-    const count = 90 + Math.floor(Math.random() * 50); // 90-140
-    const room = MAX_PARTICLES - particles.length;
-    const n = Math.min(count, room);
+  // -------------------------------------------------------------------------
+  // Firework styles
+  // -------------------------------------------------------------------------
+  const STYLE_WEIGHTS = [
+    ['chrysanthemum', 0.24],
+    ['peony',         0.22],
+    ['willow',        0.16],
+    ['palm',          0.14],
+    ['senrin',        0.13],
+    ['twostage',      0.11],
+  ];
+  function pickStyle() {
+    const r = Math.random();
+    let acc = 0;
+    for (const [name, w] of STYLE_WEIGHTS) {
+      acc += w;
+      if (r < acc) return name;
+    }
+    return 'chrysanthemum';
+  }
 
+  // 菊 — radial spherical burst with persistent thick trails
+  function spawnChrysanthemum(x, y) {
+    const want = 95 + Math.floor(Math.random() * 35);
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
-      // Roughly spherical fan-out with a little angular jitter
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.35;
-      const sp = Math.pow(Math.random(), 0.55);
-      const speed = 110 + sp * 320; // heavier punch than the original
-      const ember = pickEmber();
+      const sp = Math.pow(Math.random(), 0.45);
+      const speed = 130 + sp * 280;
+      const c = jitter(base, 35);
       const p = getParticle();
-      p.x = x; p.y = y;
-      p.trailX = x; p.trailY = y;
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
       p.vx = Math.cos(angle) * speed;
       p.vy = Math.sin(angle) * speed;
-      p.r = clamp(ember.r + (Math.random() - 0.5) * 25, 80, 255);
-      p.g = clamp(ember.g + (Math.random() - 0.5) * 22, 20, 255);
-      p.b = clamp(ember.b + (Math.random() - 0.5) * 20, 0,  200);
+      p.r = c.r; p.g = c.g; p.b = c.b;
       p.life = 1.0;
-      p.maxLife = 0.95 + Math.random() * 0.7;
-      p.size = 1.4 + Math.random() * 2.0;
+      p.maxLife = 1.3 + Math.random() * 0.6;
+      p.size = 1.5 + Math.random() * 1.8;
       p.drag = 0.978 + Math.random() * 0.012;
-      p.glow = 0.5 + Math.random() * 0.4;
+      p.glow = 0.55 + Math.random() * 0.35;
+      p.gravity = 200;
+      p.trail = true;
+      p.trailWidth = 1.6;
+      p.detonate = false;
       particles.push(p);
     }
+  }
 
+  // 牡丹 — radial spherical burst, CLEAN dots, no trails
+  function spawnPeony(x, y) {
+    const want = 110 + Math.floor(Math.random() * 40);
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const base = pickFrom(PAL_REDGOLD);
+    for (let i = 0; i < n; i++) {
+      const angle = (i / n) * Math.PI * 2 + Math.random() * 0.25;
+      const sp = Math.pow(Math.random(), 0.55);
+      const speed = 150 + sp * 320;
+      const c = jitter(base, 28);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 0.85 + Math.random() * 0.5;
+      p.size = 1.9 + Math.random() * 2.0;
+      p.drag = 0.984 + Math.random() * 0.01;
+      p.glow = 0.6 + Math.random() * 0.35;
+      p.gravity = 220;
+      p.trail = false;
+      p.detonate = false;
+      particles.push(p);
+    }
+  }
+
+  // 柳 — drooping golden trails, heavy gravity, long persistence
+  function spawnWillow(x, y) {
+    const want = 65 + Math.floor(Math.random() * 25);
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    for (let i = 0; i < n; i++) {
+      // Bias initial trajectories upward-and-outward (cone around -π/2)
+      const spread = Math.PI * 1.1;
+      const angle = -Math.PI / 2 + (Math.random() - 0.5) * spread;
+      const speed = 140 + Math.random() * 130;
+      const c = jitter(pickFrom(PAL_GOLD), 20);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 2.1 + Math.random() * 0.9;
+      p.size = 1.3 + Math.random() * 1.4;
+      p.drag = 0.992;
+      p.glow = 0.5 + Math.random() * 0.3;
+      p.gravity = 320;   // heavy — droops like a willow branch
+      p.trail = true;
+      p.trailWidth = 1.4;
+      p.detonate = false;
+      particles.push(p);
+    }
+  }
+
+  // 椰子 — palm-tree: a small number of THICK arcing streamers
+  function spawnPalm(x, y) {
+    const want = 9 + Math.floor(Math.random() * 4); // 9-12 streamers
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    const base = pickFrom(PAL_ORANGERED);
+    for (let i = 0; i < n; i++) {
+      const t = i / Math.max(1, n - 1); // 0..1 across the fan
+      const angle = -Math.PI / 2 + (t - 0.5) * Math.PI * 1.25 + (Math.random() - 0.5) * 0.18;
+      const speed = 230 + Math.random() * 120;
+      const c = jitter(base, 28);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 1.5 + Math.random() * 0.7;
+      p.size = 2.8 + Math.random() * 1.6;
+      p.drag = 0.99;
+      p.glow = 0.6;
+      p.gravity = 260;
+      p.trail = true;
+      p.trailWidth = 2.0; // very thick fronds
+      p.detonate = false;
+      particles.push(p);
+    }
+  }
+
+  // 千輪 — primary sparks that detonate again after a short lifetime
+  function spawnSenrin(x, y) {
+    const want = 18 + Math.floor(Math.random() * 7);
+    const n = Math.min(want, MAX_PARTICLES - particles.length);
+    for (let i = 0; i < n; i++) {
+      const angle = (i / n) * Math.PI * 2 + Math.random() * 0.2;
+      const speed = 150 + Math.random() * 80;
+      const baseC = pickFrom(PAL_MULTI);
+      const c = jitter(baseC, 25);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 0.55 + Math.random() * 0.25;
+      p.size = 1.8 + Math.random() * 1.3;
+      p.drag = 0.985;
+      p.glow = 0.6;
+      p.gravity = 160;
+      p.trail = true;
+      p.trailWidth = 1.2;
+      p.detonate = true;
+      p.detonateColor = pickFrom(PAL_MULTI);
+      particles.push(p);
+    }
+  }
+
+  // Secondary sub-burst when a 千輪 primary expires
+  function spawnSubBurst(x, y, baseColor) {
+    const want = 9 + Math.floor(Math.random() * 5);
+    const room = MAX_PARTICLES - particles.length;
+    const n = Math.min(want, room);
+    for (let i = 0; i < n; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 55 + Math.random() * 90;
+      const c = jitter(baseColor, 25);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 0.45 + Math.random() * 0.3;
+      p.size = 1.1 + Math.random() * 1.2;
+      p.drag = 0.978;
+      p.glow = 0.5;
+      p.gravity = 200;
+      p.trail = false;
+      p.detonate = false;
+      particles.push(p);
+    }
+  }
+
+  // 二段咲 — outer ring + inner ring, both spherical, two colors
+  function spawnTwostage(x, y) {
+    const room = MAX_PARTICLES - particles.length;
+    const outerWant = 65;
+    const innerWant = 55;
+    const outerN = Math.min(outerWant, Math.floor(room * 0.55));
+    const innerN = Math.min(innerWant, room - outerN);
+    const outerC = pickFrom(PAL_REDGOLD); // most often a red
+    const innerC = { r: 255, g: 220, b: 130 }; // gold core
+
+    for (let i = 0; i < outerN; i++) {
+      const angle = (i / outerN) * Math.PI * 2 + Math.random() * 0.08;
+      const speed = 250 + Math.random() * 80;
+      const c = jitter(outerC, 25);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 1.05 + Math.random() * 0.45;
+      p.size = 1.7 + Math.random() * 1.5;
+      p.drag = 0.982;
+      p.glow = 0.55;
+      p.gravity = 220;
+      p.trail = false;
+      p.detonate = false;
+      particles.push(p);
+    }
+    for (let i = 0; i < innerN; i++) {
+      const angle = (i / innerN) * Math.PI * 2 + Math.PI / Math.max(1, innerN);
+      const speed = 130 + Math.random() * 70;
+      const c = jitter(innerC, 22);
+      const p = getParticle();
+      p.x = x; p.y = y; p.trailX = x; p.trailY = y;
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = c.r; p.g = c.g; p.b = c.b;
+      p.life = 1.0;
+      p.maxLife = 0.95 + Math.random() * 0.4;
+      p.size = 1.6 + Math.random() * 1.3;
+      p.drag = 0.982;
+      p.glow = 0.55;
+      p.gravity = 220;
+      p.trail = false;
+      p.detonate = false;
+      particles.push(p);
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // The detonation dispatcher
+  // -------------------------------------------------------------------------
+  function explode(x, y) {
+    const style = pickStyle();
+    switch (style) {
+      case 'chrysanthemum': spawnChrysanthemum(x, y); break;
+      case 'peony':         spawnPeony(x, y);         break;
+      case 'willow':        spawnWillow(x, y);        break;
+      case 'palm':          spawnPalm(x, y);          break;
+      case 'senrin':        spawnSenrin(x, y);        break;
+      case 'twostage':      spawnTwostage(x, y);      break;
+    }
     spawnSmoke(x, y);
     spawnFlash();
     playExplosion();
-
-    // Occasional 福/春 drift after explosion
     if (Math.random() < 0.32) spawnChars(x, y);
   }
 
+  // -------------------------------------------------------------------------
+  // Particle update + render
+  // -------------------------------------------------------------------------
   function updateParticles(dt) {
     for (let i = particles.length - 1; i >= 0; i--) {
       const p = particles[i];
@@ -247,11 +494,12 @@
       p.trailY = p.y;
       p.x += p.vx * dt;
       p.y += p.vy * dt;
-      p.vy += 220 * dt;     // gravity
+      p.vy += (p.gravity || 220) * dt;
       p.vx *= p.drag;
       p.vy *= p.drag;
       p.life -= dt / p.maxLife;
       if (p.life <= 0) {
+        if (p.detonate) spawnSubBurst(p.x, p.y, p.detonateColor || { r: 255, g: 200, b: 87 });
         releaseParticle(p);
         particles.splice(i, 1);
       }
@@ -265,35 +513,39 @@
     for (let i = 0; i < particles.length; i++) {
       const p = particles[i];
       const a = Math.max(0, p.life);
-      const fade = a * a; // ease out
-      // streak / trail
-      ctx.strokeStyle = `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.6})`;
-      ctx.lineWidth = p.size;
-      ctx.beginPath();
-      ctx.moveTo(p.trailX, p.trailY);
-      ctx.lineTo(p.x, p.y);
-      ctx.stroke();
-      // bright head
+      const fade = a * a;
+
+      if (p.trail) {
+        ctx.strokeStyle = `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.6})`;
+        ctx.lineWidth = p.size * (p.trailWidth || 1);
+        ctx.beginPath();
+        ctx.moveTo(p.trailX, p.trailY);
+        ctx.lineTo(p.x, p.y);
+        ctx.stroke();
+      }
+
       const sz = p.size * (1.2 + fade * 0.6);
       ctx.fillStyle = `rgba(${p.r|0},${p.g|0},${p.b|0},${fade})`;
       ctx.beginPath();
       ctx.arc(p.x, p.y, sz, 0, Math.PI * 2);
       ctx.fill();
-      // halo
-      const haloR = sz * 4 * p.glow;
-      const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, haloR);
-      grad.addColorStop(0, `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.5})`);
-      grad.addColorStop(1, `rgba(${p.r|0},${p.g|0},${p.b|0},0)`);
-      ctx.fillStyle = grad;
-      ctx.beginPath();
-      ctx.arc(p.x, p.y, haloR, 0, Math.PI * 2);
-      ctx.fill();
+
+      if (fade > 0.05) {
+        const haloR = sz * 4 * p.glow;
+        const grad = ctx.createRadialGradient(p.x, p.y, 0, p.x, p.y, haloR);
+        grad.addColorStop(0, `rgba(${p.r|0},${p.g|0},${p.b|0},${fade * 0.5})`);
+        grad.addColorStop(1, `rgba(${p.r|0},${p.g|0},${p.b|0},0)`);
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(p.x, p.y, haloR, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
     ctx.restore();
   }
 
   // -------------------------------------------------------------------------
-  // Smoke puffs — translucent gray clouds that linger after a detonation
+  // Smoke (translucent gray puffs after a detonation)
   // -------------------------------------------------------------------------
   const smoke = [];
   function spawnSmoke(x, y) {
@@ -317,7 +569,7 @@
       const s = smoke[i];
       s.x += s.vx * dt;
       s.y += s.vy * dt;
-      s.vy += 5 * dt; // a tiny pull so smoke slows its rise
+      s.vy += 5 * dt;
       s.vx *= 0.96;
       s.r += s.growth * dt;
       s.life -= dt / s.maxLife;
@@ -329,9 +581,9 @@
       const s = smoke[i];
       const a = Math.min(1, s.life * 1.4) * 0.32;
       const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
-      grad.addColorStop(0,   `rgba(${s.tint},${s.tint},${s.tint + 6},${a})`);
-      grad.addColorStop(0.55,`rgba(${s.tint},${s.tint},${s.tint + 6},${a * 0.45})`);
-      grad.addColorStop(1,   `rgba(${s.tint},${s.tint},${s.tint + 6},0)`);
+      grad.addColorStop(0,    `rgba(${s.tint},${s.tint},${s.tint + 6},${a})`);
+      grad.addColorStop(0.55, `rgba(${s.tint},${s.tint},${s.tint + 6},${a * 0.45})`);
+      grad.addColorStop(1,    `rgba(${s.tint},${s.tint},${s.tint + 6},0)`);
       ctx.fillStyle = grad;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
@@ -340,7 +592,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // Detonation flash — full-screen overlay, hot white → yellow → orange → red
+  // Flash overlay — hot white → yellow → orange → red sweep per detonation
   // -------------------------------------------------------------------------
   const flashes = [];
   const FLASH_DURATION = 0.28;
@@ -359,15 +611,12 @@
       const a = Math.pow(1 - t, 1.5) * 0.5;
       let r, g, b;
       if (t < 0.16) {
-        // hot white → yellow
         const k = t / 0.16;
         r = 255; g = 255 - k * 40; b = 245 - k * 200;
       } else if (t < 0.5) {
-        // yellow → orange
         const k = (t - 0.16) / 0.34;
         r = 255; g = 215 - k * 100; b = 45 - k * 15;
       } else {
-        // orange → deep red
         const k = (t - 0.5) / 0.5;
         r = 255 - k * 55; g = 115 - k * 110; b = 30 - k * 30;
       }
@@ -380,7 +629,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // Floating lanterns (background flourish)
+  // Lanterns (background drift)
   // -------------------------------------------------------------------------
   const lanterns = [];
   class Lantern {
@@ -401,8 +650,7 @@
       const y = this.y + Math.sin(this.bob) * 6;
       const s = this.scale;
       ctx.save();
-      ctx.globalAlpha = 0.38;
-      // lantern glow
+      ctx.globalAlpha = 0.32;
       const halo = ctx.createRadialGradient(this.x, y, 0, this.x, y, 60 * s);
       halo.addColorStop(0, 'rgba(255, 130, 80, 0.45)');
       halo.addColorStop(1, 'rgba(120, 20, 20, 0)');
@@ -410,23 +658,19 @@
       ctx.beginPath();
       ctx.arc(this.x, y, 60 * s, 0, Math.PI * 2);
       ctx.fill();
-      // lantern body (elongated ellipse, dark warm red)
       ctx.fillStyle = 'rgba(180, 35, 30, 0.85)';
       ctx.beginPath();
       ctx.ellipse(this.x, y, 18 * s, 24 * s, 0, 0, Math.PI * 2);
       ctx.fill();
-      // top & bottom caps
       ctx.fillStyle = 'rgba(80, 25, 15, 0.9)';
       ctx.fillRect(this.x - 9 * s, y - 26 * s, 18 * s, 3 * s);
       ctx.fillRect(this.x - 9 * s, y + 23 * s, 18 * s, 3 * s);
-      // tassel
       ctx.strokeStyle = 'rgba(255, 200, 87, 0.7)';
       ctx.lineWidth = 1.2 * s;
       ctx.beginPath();
       ctx.moveTo(this.x, y + 26 * s);
       ctx.lineTo(this.x, y + 44 * s);
       ctx.stroke();
-      // tassel tuft
       ctx.fillStyle = 'rgba(255, 200, 87, 0.8)';
       ctx.beginPath();
       ctx.arc(this.x, y + 46 * s, 2.4 * s, 0, Math.PI * 2);
@@ -441,7 +685,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // 福 / 春 chars rising after big bursts
+  // 福 / 春 chars rising after some bursts
   // -------------------------------------------------------------------------
   const chars = [];
   class CharParticle {
@@ -466,8 +710,7 @@
     draw() {
       if (this.life <= 0) return;
       ctx.save();
-      const a = Math.min(1, this.life * 1.6);
-      ctx.globalAlpha = a;
+      ctx.globalAlpha = Math.min(1, this.life * 1.6);
       ctx.translate(this.x, this.y);
       ctx.rotate(this.rot);
       ctx.font = `700 ${this.size}px "PingFang TC", "Microsoft JhengHei", "Hiragino Sans GB", serif`;
@@ -487,7 +730,7 @@
   }
 
   // -------------------------------------------------------------------------
-  // Audio — synthesized boom + crackle
+  // Audio — synthesized boom
   // -------------------------------------------------------------------------
   let audioCtx = null, masterGain = null;
   function ensureAudio() {
@@ -496,7 +739,6 @@
         audioCtx = new (window.AudioContext || window.webkitAudioContext)();
         masterGain = audioCtx.createGain();
         masterGain.gain.value = 0.55;
-        // Light compression to keep peaks tame even on overlapping bursts.
         const comp = audioCtx.createDynamicsCompressor();
         comp.threshold.value = -14;
         comp.knee.value = 18;
@@ -505,9 +747,7 @@
         comp.release.value = 0.25;
         masterGain.connect(comp);
         comp.connect(audioCtx.destination);
-      } catch (e) {
-        audioCtx = null;
-      }
+      } catch (e) { audioCtx = null; }
     }
     if (audioCtx && audioCtx.state === 'suspended') audioCtx.resume();
   }
@@ -520,39 +760,32 @@
     const ac = audioCtx;
     const now = ac.currentTime;
 
-    // 1) Transient — high-passed noise click for instant attack
+    // Transient click
     const tDur = 0.025;
     const tBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * tDur), ac.sampleRate);
     const tData = tBuf.getChannelData(0);
     for (let i = 0; i < tData.length; i++) {
       tData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / tData.length, 2.5);
     }
-    const trans = ac.createBufferSource();
-    trans.buffer = tBuf;
-    const tFilt = ac.createBiquadFilter();
-    tFilt.type = 'highpass';
-    tFilt.frequency.value = 600;
-    const tGain = ac.createGain();
-    tGain.gain.value = 0.55;
+    const trans = ac.createBufferSource(); trans.buffer = tBuf;
+    const tFilt = ac.createBiquadFilter(); tFilt.type = 'highpass'; tFilt.frequency.value = 600;
+    const tGain = ac.createGain(); tGain.gain.value = 0.55;
     trans.connect(tFilt); tFilt.connect(tGain); tGain.connect(masterGain);
     trans.start(now);
 
-    // 2) Body — sine 85→26 Hz with razor-sharp attack
-    const body = ac.createOscillator();
-    const bodyGain = ac.createGain();
+    // Body 85→26 Hz, sharp attack
+    const body = ac.createOscillator(); const bodyGain = ac.createGain();
     body.type = 'sine';
     body.frequency.setValueAtTime(85 + Math.random() * 12, now);
     body.frequency.exponentialRampToValueAtTime(26, now + 0.32);
     bodyGain.gain.setValueAtTime(0.0001, now);
-    bodyGain.gain.exponentialRampToValueAtTime(1.0, now + 0.004); // ~4ms attack
+    bodyGain.gain.exponentialRampToValueAtTime(1.0, now + 0.004);
     bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
     body.connect(bodyGain); bodyGain.connect(masterGain);
-    body.start(now);
-    body.stop(now + 0.46);
+    body.start(now); body.stop(now + 0.46);
 
-    // 3) Sub — sine 42→16 Hz, the chest-thump octave below the body
-    const sub = ac.createOscillator();
-    const subGain = ac.createGain();
+    // Sub-bass thump
+    const sub = ac.createOscillator(); const subGain = ac.createGain();
     sub.type = 'sine';
     sub.frequency.setValueAtTime(42, now);
     sub.frequency.exponentialRampToValueAtTime(16, now + 0.28);
@@ -560,22 +793,17 @@
     subGain.gain.exponentialRampToValueAtTime(0.7, now + 0.006);
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
     sub.connect(subGain); subGain.connect(masterGain);
-    sub.start(now);
-    sub.stop(now + 0.38);
+    sub.start(now); sub.stop(now + 0.38);
 
-    // 4) Low rumble — lowpassed noise to fill out the tail of the boom
+    // Lowpass rumble tail
     const rDur = 0.55;
     const rBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * rDur), ac.sampleRate);
     const rData = rBuf.getChannelData(0);
     for (let i = 0; i < rData.length; i++) {
       rData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rData.length, 1.2);
     }
-    const rum = ac.createBufferSource();
-    rum.buffer = rBuf;
-    const rFilt = ac.createBiquadFilter();
-    rFilt.type = 'lowpass';
-    rFilt.frequency.value = 180;
-    rFilt.Q.value = 0.7;
+    const rum = ac.createBufferSource(); rum.buffer = rBuf;
+    const rFilt = ac.createBiquadFilter(); rFilt.type = 'lowpass'; rFilt.frequency.value = 180; rFilt.Q.value = 0.7;
     const rGain = ac.createGain();
     rGain.gain.setValueAtTime(0.0001, now);
     rGain.gain.exponentialRampToValueAtTime(0.32, now + 0.01);
@@ -583,7 +811,7 @@
     rum.connect(rFilt); rFilt.connect(rGain); rGain.connect(masterGain);
     rum.start(now);
 
-    // 5) Crackle — secondary, quieter than before so the boom dominates
+    // Bandpass crackle (secondary)
     const cDur = 0.32;
     const cBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * cDur), ac.sampleRate);
     const cData = cBuf.getChannelData(0);
@@ -592,97 +820,148 @@
       const spike = Math.random() < 0.05 ? 1.6 : 1.0;
       cData[i] = (Math.random() * 2 - 1) * env * spike;
     }
-    const crack = ac.createBufferSource();
-    crack.buffer = cBuf;
-    const cFilt = ac.createBiquadFilter();
-    cFilt.type = 'bandpass';
-    cFilt.frequency.value = 1500 + Math.random() * 1200;
-    cFilt.Q.value = 1.0;
+    const crack = ac.createBufferSource(); crack.buffer = cBuf;
+    const cFilt = ac.createBiquadFilter(); cFilt.type = 'bandpass';
+    cFilt.frequency.value = 1500 + Math.random() * 1200; cFilt.Q.value = 1.0;
     const cGain = ac.createGain();
     const cStart = now + 0.05;
     cGain.gain.setValueAtTime(0.0001, cStart);
     cGain.gain.linearRampToValueAtTime(0.18, cStart + 0.02);
     cGain.gain.exponentialRampToValueAtTime(0.001, cStart + 0.3);
     crack.connect(cFilt); cFilt.connect(cGain); cGain.connect(masterGain);
-    crack.start(cStart);
-    crack.stop(cStart + 0.34);
+    crack.start(cStart); crack.stop(cStart + 0.34);
   }
 
   // -------------------------------------------------------------------------
-  // Hand cursor — driven by MediaPipe Hands or fallback (mouse / touch)
+  // Hand tracking — convex hull of 21 landmarks per detected hand
   // -------------------------------------------------------------------------
-  const hand = {
-    x: -1000, y: -1000,
-    prevX: -1000, prevY: -1000,
-    active: false,
-    lastUpdate: 0,
-  };
-  const cursorTrail = []; // ring buffer of recent positions {x,y,t}
+  const trackedHands = []; // each: { points[], hull[], tips[], palm{x,y} }
+  let lastMpResultAt = 0;
+  let lastMpHandsCount = 0;
 
-  function setHandPos(x, y) {
-    hand.prevX = hand.active ? hand.x : x;
-    hand.prevY = hand.active ? hand.y : y;
-    hand.x = x;
-    hand.y = y;
-    hand.active = true;
-    hand.lastUpdate = performance.now();
-    cursorTrail.push({ x, y, t: hand.lastUpdate });
-    if (cursorTrail.length > 14) cursorTrail.shift();
+  function convexHull(points) {
+    if (points.length < 3) return points.slice();
+    const pts = points.slice().sort((a, b) => a.x - b.x || a.y - b.y);
+    const cross = (o, a, b) => (a.x - o.x) * (b.y - o.y) - (a.y - o.y) * (b.x - o.x);
+    const lower = [];
+    for (const p of pts) {
+      while (lower.length >= 2 && cross(lower[lower.length - 2], lower[lower.length - 1], p) <= 0) lower.pop();
+      lower.push(p);
+    }
+    const upper = [];
+    for (let i = pts.length - 1; i >= 0; i--) {
+      const p = pts[i];
+      while (upper.length >= 2 && cross(upper[upper.length - 2], upper[upper.length - 1], p) <= 0) upper.pop();
+      upper.push(p);
+    }
+    upper.pop(); lower.pop();
+    return lower.concat(upper);
   }
 
-  function drawCursor(now) {
-    // fade cursor if no recent input
-    const sinceUpdate = now - hand.lastUpdate;
-    if (!hand.active || sinceUpdate > 1200) return;
-    const fade = Math.max(0, 1 - sinceUpdate / 1200);
+  function inflateHull(hull, padding) {
+    if (hull.length === 0) return hull;
+    let cx = 0, cy = 0;
+    for (const p of hull) { cx += p.x; cy += p.y; }
+    cx /= hull.length; cy /= hull.length;
+    return hull.map(p => {
+      const dx = p.x - cx, dy = p.y - cy;
+      const d = Math.hypot(dx, dy);
+      if (d < 1e-3) return { x: p.x, y: p.y };
+      return { x: p.x + dx / d * padding, y: p.y + dy / d * padding };
+    });
+  }
 
-    // current palette-cycling color
+  function pointInPolygon(poly, x, y) {
+    let inside = false;
+    for (let i = 0, j = poly.length - 1; i < poly.length; j = i++) {
+      const xi = poly[i].x, yi = poly[i].y;
+      const xj = poly[j].x, yj = poly[j].y;
+      if (((yi > y) !== (yj > y)) && (x < (xj - xi) * (y - yi) / (yj - yi) + xi)) {
+        inside = !inside;
+      }
+    }
+    return inside;
+  }
+
+  function onHandResults(results) {
+    trackedHands.length = 0;
+    if (results.multiHandLandmarks) {
+      for (const lm of results.multiHandLandmarks) {
+        // Mirror X so the on-screen hull matches the user's mirror view.
+        const points = lm.map(p => ({ x: (1 - p.x) * W, y: p.y * H }));
+        const hull = inflateHull(convexHull(points), 20);
+        const tips = [4, 8, 12, 16, 20].map(i => points[i]);
+        let px = 0, py = 0;
+        for (const i of [0, 5, 9, 13, 17]) { px += points[i].x; py += points[i].y; }
+        trackedHands.push({
+          points, hull, tips,
+          palm: { x: px / 5, y: py / 5 },
+        });
+      }
+    }
+    lastMpResultAt = performance.now();
+    lastMpHandsCount = trackedHands.length;
+  }
+
+  function drawHandGlow(now) {
+    if (trackedHands.length === 0) return;
+    const sinceUpdate = now - lastMpResultAt;
+    if (sinceUpdate > 1500) return;
+    const fade = Math.max(0, 1 - sinceUpdate / 1500);
     const c = paletteAt(now * 0.00012);
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
-
-    // motion-blur trail
-    for (let i = 0; i < cursorTrail.length; i++) {
-      const t = cursorTrail[i];
-      const age = (now - t.t) / 350;
-      if (age >= 1) continue;
-      const a = (1 - age) * 0.32 * fade;
-      const r = 38 * (1 - age * 0.4);
-      const grad = ctx.createRadialGradient(t.x, t.y, 0, t.x, t.y, r);
-      grad.addColorStop(0, rgba(c, a));
-      grad.addColorStop(0.5, rgba(c, a * 0.5));
-      grad.addColorStop(1, rgba(c, 0));
-      ctx.fillStyle = grad;
+    for (const h of trackedHands) {
+      // Very faint hull outline so the user can see the interactive region
+      if (h.hull.length >= 3) {
+        ctx.strokeStyle = rgba(c, 0.18 * fade);
+        ctx.lineWidth = 1.4;
+        ctx.lineJoin = 'round';
+        ctx.beginPath();
+        ctx.moveTo(h.hull[0].x, h.hull[0].y);
+        for (let i = 1; i < h.hull.length; i++) ctx.lineTo(h.hull[i].x, h.hull[i].y);
+        ctx.closePath();
+        ctx.stroke();
+      }
+      // Soft palm glow
+      const pgR = 38;
+      const pg = ctx.createRadialGradient(h.palm.x, h.palm.y, 0, h.palm.x, h.palm.y, pgR);
+      pg.addColorStop(0, rgba(c, 0.32 * fade));
+      pg.addColorStop(1, rgba(c, 0));
+      ctx.fillStyle = pg;
       ctx.beginPath();
-      ctx.arc(t.x, t.y, r, 0, Math.PI * 2);
+      ctx.arc(h.palm.x, h.palm.y, pgR, 0, Math.PI * 2);
       ctx.fill();
+      // Fingertip wisps (small radial gradients)
+      for (const tip of h.tips) {
+        const r = 22;
+        const grad = ctx.createRadialGradient(tip.x, tip.y, 0, tip.x, tip.y, r);
+        grad.addColorStop(0, `rgba(255,255,255,${0.45 * fade})`);
+        grad.addColorStop(0.35, rgba(c, 0.4 * fade));
+        grad.addColorStop(1, rgba(c, 0));
+        ctx.fillStyle = grad;
+        ctx.beginPath();
+        ctx.arc(tip.x, tip.y, r, 0, Math.PI * 2);
+        ctx.fill();
+      }
     }
-
-    // bright wisp at hand position
-    const coreR = 56;
-    const grad = ctx.createRadialGradient(hand.x, hand.y, 0, hand.x, hand.y, coreR);
-    grad.addColorStop(0,   `rgba(255,255,255,${0.85 * fade})`);
-    grad.addColorStop(0.15, rgba(c, 0.75 * fade));
-    grad.addColorStop(0.55, rgba(c, 0.25 * fade));
-    grad.addColorStop(1,   rgba(c, 0));
-    ctx.fillStyle = grad;
-    ctx.beginPath();
-    ctx.arc(hand.x, hand.y, coreR, 0, Math.PI * 2);
-    ctx.fill();
-
-    // pulsing inner pip
-    const pip = 4 + 1.5 * Math.sin(now * 0.012);
-    ctx.fillStyle = `rgba(255, 255, 255, ${0.95 * fade})`;
-    ctx.beginPath();
-    ctx.arc(hand.x, hand.y, pip, 0, Math.PI * 2);
-    ctx.fill();
-
     ctx.restore();
   }
 
+  // Mouse fallback — single-point cursor as a fake one-vertex "hull" so
+  // collision still works when the camera isn't producing results yet.
+  const mouse = { x: -1000, y: -1000, prevX: -1000, prevY: -1000, active: false, lastUpdate: 0 };
+  function setMouse(x, y) {
+    mouse.prevX = mouse.active ? mouse.x : x;
+    mouse.prevY = mouse.active ? mouse.y : y;
+    mouse.x = x; mouse.y = y;
+    mouse.active = true;
+    mouse.lastUpdate = performance.now();
+  }
+
   // -------------------------------------------------------------------------
-  // Collision: swept-segment from hand.prev → hand.current vs seeds
+  // Collision
   // -------------------------------------------------------------------------
   function distSegPoint(ax, ay, bx, by, px, py) {
     const dx = bx - ax, dy = by - ay;
@@ -693,25 +972,61 @@
     return Math.hypot(px - (ax + dx * t), py - (ay + dy * t));
   }
 
-  const COLLISION_RADIUS = 44;
   function checkCollisions(now) {
-    if (!hand.active) return;
-    if (now - hand.lastUpdate > 600) return;
+    const mpFresh = trackedHands.length > 0 && (now - lastMpResultAt) < 600;
+    const mouseFresh = mouse.active && (now - mouse.lastUpdate) < 400;
+    if (!mpFresh && !mouseFresh) return;
+
     for (let i = 0; i < seeds.length; i++) {
       const s = seeds[i];
       if (!s.alive) continue;
-      const d = distSegPoint(hand.prevX, hand.prevY, hand.x, hand.y, s.x, s.y);
-      if (d < COLLISION_RADIUS + s.r) {
-        s.alive = false;
-        explode(s.x, s.y, s.color);
+
+      if (mpFresh) {
+        let hit = false;
+        for (const h of trackedHands) {
+          if (pointInPolygon(h.hull, s.x, s.y)) { hit = true; break; }
+        }
+        if (hit) {
+          s.alive = false;
+          explode(s.x, s.y);
+          continue;
+        }
+      } else if (mouseFresh) {
+        const d = distSegPoint(mouse.prevX, mouse.prevY, mouse.x, mouse.y, s.x, s.y);
+        if (d < 46 + s.r) {
+          s.alive = false;
+          explode(s.x, s.y);
+        }
       }
     }
   }
 
+  function drawMouseCursor(now) {
+    // Only show the mouse-fallback cursor when MediaPipe hasn't produced
+    // results in a while — once hands are tracked, the webcam shows the
+    // actual hand and any extra cursor would be visual noise.
+    const mpFresh = trackedHands.length > 0 && (now - lastMpResultAt) < 600;
+    if (mpFresh) return;
+    if (!mouse.active || (now - mouse.lastUpdate) > 1200) return;
+    const fade = Math.max(0, 1 - (now - mouse.lastUpdate) / 1200);
+    const c = paletteAt(now * 0.00012);
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
+    const r = 44;
+    const grad = ctx.createRadialGradient(mouse.x, mouse.y, 0, mouse.x, mouse.y, r);
+    grad.addColorStop(0,    `rgba(255,255,255,${0.75 * fade})`);
+    grad.addColorStop(0.2,  rgba(c, 0.6 * fade));
+    grad.addColorStop(1,    rgba(c, 0));
+    ctx.fillStyle = grad;
+    ctx.beginPath();
+    ctx.arc(mouse.x, mouse.y, r, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.restore();
+  }
+
   // -------------------------------------------------------------------------
-  // MediaPipe Hands setup (desktop)
+  // MediaPipe Hands init
   // -------------------------------------------------------------------------
-  let mpReady = false;
   async function initHandTracking() {
     let stream;
     try {
@@ -733,7 +1048,7 @@
     await video.play().catch(() => {});
 
     if (typeof Hands === 'undefined') {
-      console.warn('MediaPipe Hands not loaded; falling back to mouse.');
+      console.warn('MediaPipe Hands global missing; using mouse fallback only.');
       return;
     }
 
@@ -752,8 +1067,7 @@
     const tick = async () => {
       if (!sending && video.readyState >= 2) {
         sending = true;
-        try { await hands.send({ image: video }); }
-        catch (e) { /* swallow transient errors */ }
+        try { await hands.send({ image: video }); } catch (e) { /* swallow */ }
         sending = false;
       }
       requestAnimationFrame(tick);
@@ -761,30 +1075,10 @@
     tick();
   }
 
-  function onHandResults(results) {
-    mpReady = true;
-    if (results.multiHandLandmarks && results.multiHandLandmarks.length > 0) {
-      // palm centroid: wrist + base of fingers
-      const lm = results.multiHandLandmarks[0];
-      const idxs = [0, 5, 9, 13, 17];
-      let nx = 0, ny = 0;
-      for (const i of idxs) { nx += lm[i].x; ny += lm[i].y; }
-      nx /= idxs.length; ny /= idxs.length;
-      // camera is mirrored visually; flip x so right hand → right side
-      const sx = (1 - nx) * W;
-      const sy = ny * H;
-      setHandPos(sx, sy);
-      video.classList.remove('idle');
-    } else {
-      hand.active = false;
-      video.classList.add('idle');
-    }
-  }
-
   // -------------------------------------------------------------------------
-  // Fallbacks: mouse on desktop (until MediaPipe takes over), tap on mobile
+  // Fallbacks
   // -------------------------------------------------------------------------
-  function explodeNearest(x, y, radius = 110) {
+  function explodeNearest(x, y, radius = 130) {
     let nearest = null, nd = radius;
     for (const s of seeds) {
       if (!s.alive) continue;
@@ -793,10 +1087,9 @@
     }
     if (nearest) {
       nearest.alive = false;
-      explode(nearest.x, nearest.y, nearest.color);
+      explode(nearest.x, nearest.y);
     } else {
-      // no seed nearby: paint a small burst so taps always feel alive
-      explode(x, y, PALETTE[Math.floor(Math.random() * PALETTE.length)]);
+      explode(x, y);
     }
   }
 
@@ -806,62 +1099,63 @@
       ensureAudio();
       const t = e.touches ? e.touches[0] : e;
       if (!t) return;
-      setHandPos(t.clientX, t.clientY);
+      setMouse(t.clientX, t.clientY);
       explodeNearest(t.clientX, t.clientY);
     };
     window.addEventListener('pointerdown', onTouch, { passive: true });
     window.addEventListener('pointermove', (e) => {
-      if (e.pressure > 0 || e.buttons > 0) {
-        setHandPos(e.clientX, e.clientY);
-      }
+      if (e.pressure > 0 || e.buttons > 0) setMouse(e.clientX, e.clientY);
     }, { passive: true });
   } else {
-    // mouse mirrors hand if MediaPipe has not produced results yet (or hasn't recently)
     window.addEventListener('mousemove', (e) => {
-      if (performance.now() - hand.lastUpdate > 400) {
-        setHandPos(e.clientX, e.clientY);
-      }
+      const mpFresh = trackedHands.length > 0 && (performance.now() - lastMpResultAt) < 400;
+      if (!mpFresh) setMouse(e.clientX, e.clientY);
     });
     window.addEventListener('mousedown', () => ensureAudio());
     initHandTracking();
   }
 
   // -------------------------------------------------------------------------
-  // Background rendering
+  // Background — translucent night-sky overlay over the webcam, + stars,
+  // + faint horizon glow.
   // -------------------------------------------------------------------------
-  // Pre-cache the gradient since W/H rarely change
   let bgGradient = null;
   function rebuildBgGradient() {
     bgGradient = ctx.createLinearGradient(0, 0, 0, H);
-    bgGradient.addColorStop(0,    '#0a0e2a');
-    bgGradient.addColorStop(0.55, '#141039');
-    bgGradient.addColorStop(1,    '#1a1240');
+    bgGradient.addColorStop(0,    'rgba(10, 14, 42, 0.62)');
+    bgGradient.addColorStop(0.55, 'rgba(20, 16, 57, 0.55)');
+    bgGradient.addColorStop(1,    'rgba(26, 18, 64, 0.48)');
   }
   rebuildBgGradient();
   window.addEventListener('resize', rebuildBgGradient);
 
   function drawBackground(now) {
+    // Clear so the webcam shows through where we don't paint
+    ctx.clearRect(0, 0, W, H);
     ctx.fillStyle = bgGradient;
     ctx.fillRect(0, 0, W, H);
 
-    // stars
+    // Stars (additive twinkle)
+    ctx.save();
+    ctx.globalCompositeOperation = 'lighter';
     for (let i = 0; i < stars.length; i++) {
       const s = stars[i];
       s.twinkle += s.speed;
       s.x += s.drift;
       if (s.x < -2) s.x = W + 2;
       else if (s.x > W + 2) s.x = -2;
-      const a = 0.35 + 0.45 * (0.5 + 0.5 * Math.sin(s.twinkle));
+      const a = 0.25 + 0.35 * (0.5 + 0.5 * Math.sin(s.twinkle));
       ctx.fillStyle = `rgba(255, 245, 220, ${a})`;
       ctx.beginPath();
       ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
       ctx.fill();
     }
+    ctx.restore();
 
-    // subtle horizon glow at bottom
+    // Subtle horizon glow at the bottom
     const horizon = ctx.createLinearGradient(0, H * 0.6, 0, H);
     horizon.addColorStop(0, 'rgba(255, 107, 53, 0)');
-    horizon.addColorStop(1, 'rgba(255, 107, 53, 0.06)');
+    horizon.addColorStop(1, 'rgba(255, 107, 53, 0.05)');
     ctx.fillStyle = horizon;
     ctx.fillRect(0, H * 0.6, W, H * 0.4);
   }
@@ -871,19 +1165,13 @@
   // -------------------------------------------------------------------------
   let lastTime = performance.now();
 
-  function clamp(v, lo, hi) {
-    return v < lo ? lo : v > hi ? hi : v;
-  }
-
   function frame(now) {
     const dt = Math.min(0.06, (now - lastTime) / 1000);
     lastTime = now;
 
-    // spawn
     spawnSeeds(dt);
     spawnLantern();
 
-    // update
     for (let i = 0; i < seeds.length; i++) seeds[i].update(dt, now * 0.001);
     for (let i = seeds.length - 1; i >= 0; i--) if (!seeds[i].alive) seeds.splice(i, 1);
 
@@ -898,32 +1186,25 @@
 
     checkCollisions(now);
 
-    // draw
     drawBackground(now);
     for (const l of lanterns) l.draw();
     for (const s of seeds) s.draw(now * 0.001);
-    drawSmoke();        // smoke sits behind the bright embers
+    drawSmoke();
     drawParticles();
-    drawCursor(now);
+    drawHandGlow(now);
+    drawMouseCursor(now);
     for (const c of chars) c.draw();
-    drawFlash(dt);      // hot white → yellow → orange → red
+    drawFlash(dt);
 
     requestAnimationFrame(frame);
   }
   requestAnimationFrame((t) => { lastTime = t; frame(t); });
 
   // -------------------------------------------------------------------------
-  // Pre-seed a couple of welcoming bursts so the first thing visitors see is
-  // a sky that's already alive.
+  // Welcoming bursts so the sky is alive before the user does anything
   // -------------------------------------------------------------------------
-  setTimeout(() => {
-    explode(W * 0.3, H * 0.4, PALETTE[1]);
-  }, 700);
-  setTimeout(() => {
-    explode(W * 0.72, H * 0.55, PALETTE[3]);
-  }, 1500);
-  setTimeout(() => {
-    explode(W * 0.5, H * 0.35, PALETTE[2]);
-  }, 2400);
+  setTimeout(() => explode(W * 0.30, H * 0.40), 700);
+  setTimeout(() => explode(W * 0.72, H * 0.55), 1500);
+  setTimeout(() => explode(W * 0.50, H * 0.35), 2400);
 
 })();

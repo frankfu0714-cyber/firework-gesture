@@ -20,28 +20,24 @@
     color: #fff;
   }
 
+  /* Webcam sits behind the canvas, mirrored, filling the viewport. The
+     canvas above paints a translucent night-sky gradient over it. */
+  #video {
+    position: fixed; inset: 0;
+    width: 100vw; height: 100vh;
+    object-fit: cover;
+    transform: scaleX(-1);
+    z-index: 0;
+    background: #0a0e2a;
+    pointer-events: none;
+  }
+
   #canvas {
     position: fixed; inset: 0;
     display: block;
     width: 100vw; height: 100vh;
+    z-index: 1;
   }
-
-  #video {
-    position: fixed;
-    bottom: 20px; right: 20px;
-    width: 180px; height: 135px;
-    object-fit: cover;
-    border-radius: 14px;
-    border: 1px solid rgba(255, 216, 107, 0.25);
-    box-shadow: 0 12px 36px rgba(0,0,0,0.55), 0 0 24px rgba(255, 107, 53, 0.12);
-    transform: scaleX(-1);
-    opacity: 0.55;
-    z-index: 5;
-    pointer-events: none;
-    background: #000;
-    transition: opacity 0.6s ease;
-  }
-  #video.idle { opacity: 0.35; }
 
   #title-wrap {
     position: fixed; inset: 0;
