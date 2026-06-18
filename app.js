@@ -239,7 +239,13 @@
   // A pinch flings out a small handful of seeds from the pinch point.
   // Rate-limit is enforced by rising-edge pinch detection in onHandResults
   // (one batch per "release → squeeze" transition).
-  const MAX_SEEDS_TOTAL = 50;
+  //
+  // Cap is intentionally generous — pinch should be able to flood the sky.
+  // 500 is a runaway-only safety, not a creative ceiling; balls off the
+  // bottom edge are culled in Seed.update so accumulation has a natural
+  // outlet. Auto-spawn still self-limits at 28 so the ambient sky stays
+  // sparse; only pinches can push past that.
+  const MAX_SEEDS_TOTAL = 500;
   function spawnPinchBatch(x, y) {
     const want = 6 + Math.floor(Math.random() * 7); // 6-12
     const room = Math.max(0, MAX_SEEDS_TOTAL - seeds.length);
