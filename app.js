@@ -128,6 +128,8 @@
 
   class Seed {
     constructor(opts) {
+      const huge = !!(opts && opts.huge);
+      this.huge = huge;
       if (opts) {
         this.x = opts.x;
         this.y = opts.y;
@@ -139,20 +141,24 @@
         this.initialVx = 0;
         this.initialVy = 0;
       }
-      this.targetVy = 18 + Math.random() * 24; // gentle terminal fall
-      this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-      this.r = 8 + Math.random() * 4; // diameter 16-24
+      // Huge balls fall slower and barely sway (they're "heavier").
+      this.targetVy = huge ? 11 + Math.random() * 6 : 18 + Math.random() * 24;
+      this.color = huge
+        ? { r: 255, g: 210, b: 100 } // warm gold
+        : PALETTE[Math.floor(Math.random() * PALETTE.length)];
+      this.r = huge ? 30 + Math.random() * 10 : 8 + Math.random() * 4;
       this.phase = Math.random() * Math.PI * 2;
-      this.swayAmp = 6 + Math.random() * 14;
+      this.swayAmp = huge ? 3 + Math.random() * 3 : 6 + Math.random() * 14;
       this.swayFreq = 0.4 + Math.random() * 0.5;
       this.t0 = performance.now() * 0.001;
+      this.haloRotation = Math.random() * Math.PI * 2;
       this.alive = true;
     }
     update(dt, now) {
       // Decay any fling velocity (from a pinch-spawn) so the ball settles
       // into the gentle terminal fall over roughly a second.
       if (this.initialVx !== 0 || this.initialVy !== 0) {
-        const decay = Math.pow(0.15, dt); // ~15% retained per second
+        const decay = Math.pow(0.15, dt);
         this.initialVx *= decay;
         this.initialVy *= decay;
         if (Math.abs(this.initialVx) < 0.3) this.initialVx = 0;
@@ -161,6 +167,8 @@
       this.y += (this.initialVy + this.targetVy) * dt;
       this.x += this.initialVx * dt;
       this.x += Math.cos((now - this.t0) * this.swayFreq + this.phase) * this.swayAmp * dt;
+      // Huge balls rotate their halo at ~0.7 rad/s (one turn per ~9s)
+      if (this.huge) this.haloRotation += dt * 0.7;
       if (this.y > H + 40 || this.x < -40 || this.x > W + 40) this.alive = false;
     }
     draw(now) {
@@ -183,16 +191,45 @@
       // Warm outer halo (additive)
       ctx.save();
       ctx.globalCompositeOperation = 'lighter';
-      const haloR = r * 2.6;
+      const haloR = r * (this.huge ? 3.2 : 2.6);
       const hg = ctx.createRadialGradient(x, y, r * 0.7, x, y, haloR);
-      hg.addColorStop(0,   rgba(c, 0.55 * pulse));
-      hg.addColorStop(0.4, rgba(c, 0.22 * pulse));
+      hg.addColorStop(0,   rgba(c, (this.huge ? 0.75 : 0.55) * pulse));
+      hg.addColorStop(0.4, rgba(c, (this.huge ? 0.35 : 0.22) * pulse));
       hg.addColorStop(1,   rgba(c, 0));
       ctx.fillStyle = hg;
       ctx.beginPath();
       ctx.arc(x, y, haloR, 0, Math.PI * 2);
       ctx.fill();
       ctx.restore();
+
+      // Rotating sunburst rays — huge balls only
+      if (this.huge) {
+        ctx.save();
+        ctx.globalCompositeOperation = 'lighter';
+        ctx.translate(x, y);
+        ctx.rotate(this.haloRotation);
+        const rayCount = 12;
+        const innerR = r * 1.4;
+        const outerR = r * 2.4;
+        for (let i = 0; i < rayCount; i++) {
+          const a = (i / rayCount) * Math.PI * 2;
+          const ix = Math.cos(a) * innerR;
+          const iy = Math.sin(a) * innerR;
+          const ox = Math.cos(a) * outerR;
+          const oy = Math.sin(a) * outerR;
+          const rayGrad = ctx.createLinearGradient(ix, iy, ox, oy);
+          rayGrad.addColorStop(0, rgba(c, 0.45 * pulse));
+          rayGrad.addColorStop(1, rgba(c, 0));
+          ctx.strokeStyle = rayGrad;
+          ctx.lineWidth = 2.4;
+          ctx.lineCap = 'round';
+          ctx.beginPath();
+          ctx.moveTo(ix, iy);
+          ctx.lineTo(ox, oy);
+          ctx.stroke();
+        }
+        ctx.restore();
+      }
 
       // 3D sphere body — light source upper-left
       const lightX = x - r * 0.42;
@@ -262,11 +299,28 @@
     }
   }
 
+  // Long-pinch payoff: a single ~3-4x diameter ball that detonates with a
+  // massively scaled 三尺玉-style burst. Triggered by a 5s sustained pinch
+  // via the rising-edge logic in onHandResults (see HUGE_CHARGE_SECONDS).
+  function spawnHugeBall(x, y) {
+    if (seeds.length >= MAX_SEEDS_TOTAL) return;
+    seeds.push(new Seed({
+      x: x,
+      y: y - 30, // appear just above the pinch
+      vx: (Math.random() - 0.5) * 16,
+      vy: -12, // tiny upward release
+      huge: true,
+    }));
+    playHugeCharge();
+  }
+
   // -------------------------------------------------------------------------
   // Particle pool — supports trails, varying gravity, optional secondary
   // detonation (for 千輪).
   // -------------------------------------------------------------------------
-  const MAX_PARTICLES = 700;
+  // Raised from 700 → 1100 so a huge-ball detonation (380-540 particles)
+  // can land without starving normal concurrent bursts of their budget.
+  const MAX_PARTICLES = 1100;
   const particlePool = [];
   const particles = [];
   function getParticle() { return particlePool.pop() || {}; }
@@ -296,15 +350,19 @@
     return 'chrysanthemum';
   }
 
-  // 菊 — radial spherical burst with persistent thick trails
-  function spawnChrysanthemum(x, y) {
-    const want = 95 + Math.floor(Math.random() * 35);
+  // 菊 — radial spherical burst with persistent thick trails. With opts.huge,
+  // counts and speeds scale up for the long-pinch detonation.
+  function spawnChrysanthemum(x, y, opts) {
+    const huge = !!(opts && opts.huge);
+    const want = huge
+      ? 360 + Math.floor(Math.random() * 140) // 360-500
+      : 95  + Math.floor(Math.random() * 35);
     const n = Math.min(want, MAX_PARTICLES - particles.length);
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.35;
       const sp = Math.pow(Math.random(), 0.45);
-      const speed = 130 + sp * 280;
+      const speed = huge ? 220 + sp * 450 : 130 + sp * 280;
       const c = jitter(base, 35);
       const p = getParticle();
       p.x = x; p.y = y; p.trailX = x; p.trailY = y;
@@ -312,27 +370,30 @@
       p.vy = Math.sin(angle) * speed;
       p.r = c.r; p.g = c.g; p.b = c.b;
       p.life = 1.0;
-      p.maxLife = 1.3 + Math.random() * 0.6;
-      p.size = 1.5 + Math.random() * 1.8;
+      p.maxLife = huge ? 1.7 + Math.random() * 0.9 : 1.3 + Math.random() * 0.6;
+      p.size = huge ? 2.1 + Math.random() * 2.0 : 1.5 + Math.random() * 1.8;
       p.drag = 0.978 + Math.random() * 0.012;
-      p.glow = 0.55 + Math.random() * 0.35;
+      p.glow = (huge ? 0.7 : 0.55) + Math.random() * 0.35;
       p.gravity = 200;
       p.trail = true;
-      p.trailWidth = 1.6;
+      p.trailWidth = huge ? 2.0 : 1.6;
       p.detonate = false;
       particles.push(p);
     }
   }
 
-  // 牡丹 — radial spherical burst, CLEAN dots, no trails
-  function spawnPeony(x, y) {
-    const want = 110 + Math.floor(Math.random() * 40);
+  // 牡丹 — radial spherical burst, CLEAN dots, no trails. opts.huge scales up.
+  function spawnPeony(x, y, opts) {
+    const huge = !!(opts && opts.huge);
+    const want = huge
+      ? 380 + Math.floor(Math.random() * 140) // 380-520
+      : 110 + Math.floor(Math.random() * 40);
     const n = Math.min(want, MAX_PARTICLES - particles.length);
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.25;
       const sp = Math.pow(Math.random(), 0.55);
-      const speed = 150 + sp * 320;
+      const speed = huge ? 240 + sp * 480 : 150 + sp * 320;
       const c = jitter(base, 28);
       const p = getParticle();
       p.x = x; p.y = y; p.trailX = x; p.trailY = y;
@@ -340,10 +401,10 @@
       p.vy = Math.sin(angle) * speed;
       p.r = c.r; p.g = c.g; p.b = c.b;
       p.life = 1.0;
-      p.maxLife = 0.85 + Math.random() * 0.5;
-      p.size = 1.9 + Math.random() * 2.0;
+      p.maxLife = huge ? 1.25 + Math.random() * 0.7 : 0.85 + Math.random() * 0.5;
+      p.size = huge ? 2.4 + Math.random() * 2.2 : 1.9 + Math.random() * 2.0;
       p.drag = 0.984 + Math.random() * 0.01;
-      p.glow = 0.6 + Math.random() * 0.35;
+      p.glow = (huge ? 0.75 : 0.6) + Math.random() * 0.35;
       p.gravity = 220;
       p.trail = false;
       p.detonate = false;
@@ -613,20 +674,32 @@
   // -------------------------------------------------------------------------
   // The detonation dispatcher
   // -------------------------------------------------------------------------
-  function explode(x, y) {
-    const style = pickStyle();
+  function explode(x, y, opts) {
+    const huge = !!(opts && opts.huge);
+    // Huge balls always read as 三尺玉-style spherical bursts: 菊 or 牡丹.
+    const style = huge
+      ? (Math.random() < 0.5 ? 'chrysanthemum' : 'peony')
+      : pickStyle();
     switch (style) {
-      case 'chrysanthemum': spawnChrysanthemum(x, y); break;
-      case 'peony':         spawnPeony(x, y);         break;
-      case 'willow':        spawnWillow(x, y);        break;
-      case 'palm':          spawnPalm(x, y);          break;
-      case 'senrin':        spawnSenrin(x, y);        break;
-      case 'twostage':      spawnTwostage(x, y);      break;
-      case 'shidare':       spawnShidare(x, y);       break;
+      case 'chrysanthemum': spawnChrysanthemum(x, y, opts); break;
+      case 'peony':         spawnPeony(x, y, opts);         break;
+      case 'willow':        spawnWillow(x, y);              break;
+      case 'palm':          spawnPalm(x, y);                break;
+      case 'senrin':        spawnSenrin(x, y);              break;
+      case 'twostage':      spawnTwostage(x, y);            break;
+      case 'shidare':       spawnShidare(x, y);             break;
     }
-    spawnSmoke(x, y);
-    spawnFlash();
-    playExplosion();
+    // Skip smoke for shidare — the delicate gold rain looks better without
+    // it; the heavy puff was reading as a tonal mismatch.
+    if (style !== 'shidare') spawnSmoke(x, y);
+    if (huge) {
+      spawnFlash({ duration: 0.5, scale: 1.7 });
+      triggerShake(4.5, 0.32);
+      playHugeExplosion();
+    } else {
+      spawnFlash();
+      playExplosion();
+    }
     if (Math.random() < 0.32) spawnChars(x, y);
   }
 
@@ -762,19 +835,27 @@
   // -------------------------------------------------------------------------
   const flashes = [];
   const FLASH_DURATION = 0.28;
-  function spawnFlash() {
-    flashes.push({ t: 0 });
+  // opts: { duration, scale } — huge explosions pass longer/brighter flashes.
+  function spawnFlash(opts) {
+    flashes.push({
+      t: 0,
+      duration: (opts && opts.duration) || FLASH_DURATION,
+      scale:    (opts && opts.scale)    || 1.0,
+    });
     if (flashes.length > 6) flashes.shift();
   }
   function drawFlash(dt) {
     if (flashes.length === 0) return;
     let aggR = 0, aggG = 0, aggB = 0, aggA = 0;
+    let maxScale = 1.0;
     for (let i = flashes.length - 1; i >= 0; i--) {
       const f = flashes[i];
+      const duration = f.duration || FLASH_DURATION;
+      const scale    = f.scale    || 1.0;
       f.t += dt;
-      if (f.t >= FLASH_DURATION) { flashes.splice(i, 1); continue; }
-      const t = f.t / FLASH_DURATION;
-      const a = Math.pow(1 - t, 1.5) * 0.5;
+      if (f.t >= duration) { flashes.splice(i, 1); continue; }
+      const t = f.t / duration;
+      const a = Math.pow(1 - t, 1.5) * 0.5 * scale;
       let r, g, b;
       if (t < 0.16) {
         const k = t / 0.16;
@@ -787,11 +868,25 @@
         r = 255 - k * 55; g = 115 - k * 110; b = 30 - k * 30;
       }
       aggR += r * a; aggG += g * a; aggB += b * a; aggA += a;
+      if (scale > maxScale) maxScale = scale;
     }
     if (aggA <= 0) return;
-    const cap = Math.min(0.55, aggA);
-    ctx.fillStyle = `rgba(${(aggR/aggA)|0},${(aggG/aggA)|0},${(aggB/aggA)|0},${cap})`;
+    // Let big flashes punch through harder — cap scales with the biggest
+    // contributing flash (so a huge always lands brighter than a normal one).
+    const cap = Math.min(0.55 * maxScale, 0.72);
+    ctx.fillStyle = `rgba(${(aggR/aggA)|0},${(aggG/aggA)|0},${(aggB/aggA)|0},${Math.min(aggA, cap)})`;
     ctx.fillRect(0, 0, W, H);
+  }
+
+  // Camera shake — translates the canvas drawing (not the webcam) for a
+  // brief wobble. Applied by the main frame loop, decays linearly.
+  let shakeRemain = 0;
+  let shakeAmp = 0;
+  let shakeDuration = 0;
+  function triggerShake(amp, duration) {
+    shakeAmp = amp || 4;
+    shakeDuration = duration || 0.3;
+    shakeRemain = shakeDuration;
   }
 
   // -------------------------------------------------------------------------
@@ -998,6 +1093,104 @@
     crack.start(cStart); crack.stop(cStart + 0.34);
   }
 
+  // Huge-ball detonation — deeper, heavier, longer than the regular boom.
+  // Body 65→18 Hz (vs 85→26), sub 32→10 Hz (vs 42→16), 0.9s rumble.
+  function playHugeExplosion() {
+    if (!audioCtx) return;
+    const ac = audioCtx;
+    const now = ac.currentTime;
+
+    // Transient
+    const tDur = 0.04;
+    const tBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * tDur), ac.sampleRate);
+    const tData = tBuf.getChannelData(0);
+    for (let i = 0; i < tData.length; i++) {
+      tData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / tData.length, 2);
+    }
+    const trans = ac.createBufferSource(); trans.buffer = tBuf;
+    const tFilt = ac.createBiquadFilter(); tFilt.type = 'highpass'; tFilt.frequency.value = 400;
+    const tGain = ac.createGain(); tGain.gain.value = 0.7;
+    trans.connect(tFilt); tFilt.connect(tGain); tGain.connect(masterGain);
+    trans.start(now);
+
+    // Deeper body
+    const body = ac.createOscillator(); const bodyGain = ac.createGain();
+    body.type = 'sine';
+    body.frequency.setValueAtTime(65 + Math.random() * 10, now);
+    body.frequency.exponentialRampToValueAtTime(18, now + 0.55);
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.exponentialRampToValueAtTime(1.0, now + 0.006);
+    bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
+    body.connect(bodyGain); bodyGain.connect(masterGain);
+    body.start(now); body.stop(now + 0.75);
+
+    // Huge sub
+    const sub = ac.createOscillator(); const subGain = ac.createGain();
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(32, now);
+    sub.frequency.exponentialRampToValueAtTime(10, now + 0.4);
+    subGain.gain.setValueAtTime(0.0001, now);
+    subGain.gain.exponentialRampToValueAtTime(0.9, now + 0.008);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
+    sub.connect(subGain); subGain.connect(masterGain);
+    sub.start(now); sub.stop(now + 0.55);
+
+    // Long lowpass rumble
+    const rDur = 0.9;
+    const rBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * rDur), ac.sampleRate);
+    const rData = rBuf.getChannelData(0);
+    for (let i = 0; i < rData.length; i++) {
+      rData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rData.length, 1.0);
+    }
+    const rum = ac.createBufferSource(); rum.buffer = rBuf;
+    const rFilt = ac.createBiquadFilter(); rFilt.type = 'lowpass'; rFilt.frequency.value = 150; rFilt.Q.value = 0.7;
+    const rGain = ac.createGain();
+    rGain.gain.setValueAtTime(0.0001, now);
+    rGain.gain.exponentialRampToValueAtTime(0.42, now + 0.015);
+    rGain.gain.exponentialRampToValueAtTime(0.001, now + 0.9);
+    rum.connect(rFilt); rFilt.connect(rGain); rGain.connect(masterGain);
+    rum.start(now);
+
+    // Bigger, longer crackle (delayed)
+    const cDur = 0.55;
+    const cBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * cDur), ac.sampleRate);
+    const cData = cBuf.getChannelData(0);
+    for (let i = 0; i < cData.length; i++) {
+      const env = Math.pow(1 - i / cData.length, 1.4);
+      const spike = Math.random() < 0.05 ? 1.8 : 1.0;
+      cData[i] = (Math.random() * 2 - 1) * env * spike;
+    }
+    const crack = ac.createBufferSource(); crack.buffer = cBuf;
+    const cFilt = ac.createBiquadFilter(); cFilt.type = 'bandpass';
+    cFilt.frequency.value = 1100 + Math.random() * 1000; cFilt.Q.value = 1.0;
+    const cGain = ac.createGain();
+    const cStart = now + 0.08;
+    cGain.gain.setValueAtTime(0.0001, cStart);
+    cGain.gain.linearRampToValueAtTime(0.22, cStart + 0.03);
+    cGain.gain.exponentialRampToValueAtTime(0.001, cStart + 0.5);
+    crack.connect(cFilt); cFilt.connect(cGain); cGain.connect(masterGain);
+    crack.start(cStart); crack.stop(cStart + 0.55);
+  }
+
+  // Charge-release tone played when the huge ball spawns from the long pinch.
+  // Rising resonant sine — gives the appearing ball some sonic weight.
+  function playHugeCharge() {
+    if (!audioCtx) return;
+    const ac = audioCtx;
+    const now = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(120, now);
+    osc.frequency.exponentialRampToValueAtTime(220, now + 0.5);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.22, now + 0.1);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 1.0);
+    osc.connect(gain); gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + 1.05);
+  }
+
   // Soft upchirp on pinch — gestural acknowledgement, sub-audible loudness
   function playPinch() {
     if (!audioCtx) return;
@@ -1073,6 +1266,14 @@
   const OPEN_PALM_MIN      = 4;    // fingers extended required for "palm"
   const PINCH_PALM_FRACTION = 0.40; // pinch if dist(4,8) < this * palmWidth
   const PINCH_MIN_PX        = 50;  // ...or this many screen pixels
+  const HUGE_CHARGE_SECONDS = 5.0; // sustained pinch duration to spawn huge
+
+  // Per-slot persistent state across MediaPipe frames. Index 0 / 1 follow
+  // results.multiHandLandmarks order. If a slot disappears (hand removed),
+  // its entry stays in the array until the next frame's prevPinch snapshot
+  // overwrites — only the new arrival's first frame can be affected, which
+  // we handle defensively with wasPinch=true defaults.
+  const handPinchState = []; // { pinchStartedAt, spawnedHuge }
 
   function onHandResults(results) {
     // Snapshot prior pinch state by hand index so we can detect rising
@@ -1126,6 +1327,28 @@
         const wasPinch = i < prevPinch.length ? prevPinch[i] : true;
         const pinchTrigger = !wasPinch && isPinch;
 
+        // Sustained-pinch tracking for the huge-ball charge.
+        const nowMs = performance.now();
+        let pinchStartedAt = null;
+        let spawnedHuge = false;
+        if (isPinch) {
+          if (pinchTrigger) {
+            pinchStartedAt = nowMs;
+            spawnedHuge = false;
+          } else {
+            const prevState = i < handPinchState.length ? handPinchState[i] : null;
+            pinchStartedAt = (prevState && prevState.pinchStartedAt) || nowMs;
+            spawnedHuge    = !!(prevState && prevState.spawnedHuge);
+          }
+        }
+        const pinchHeldFor = pinchStartedAt ? (nowMs - pinchStartedAt) / 1000 : 0;
+        let hugeTrigger = false;
+        if (isPinch && pinchHeldFor >= HUGE_CHARGE_SECONDS && !spawnedHuge) {
+          hugeTrigger = true;
+          spawnedHuge = true;
+        }
+        const chargeT = Math.min(1, pinchHeldFor / HUGE_CHARGE_SECONDS);
+
         trackedHands.push({
           points, hull, tips, palm,
           palmWidth,
@@ -1133,6 +1356,11 @@
           isOpenPalm, isPinch,
           pose,
           pinchTrigger,
+          pinchHeldFor,
+          chargeT,
+          hugeTrigger,
+          pinchStartedAt,
+          spawnedHuge,
           pinchPoint: {
             x: (thumbTip.x + indexTip.x) / 2,
             y: (thumbTip.y + indexTip.y) / 2,
@@ -1140,6 +1368,16 @@
         });
       }
     }
+
+    // Persist next-frame state per slot
+    handPinchState.length = 0;
+    for (const h of trackedHands) {
+      handPinchState.push({
+        pinchStartedAt: h.pinchStartedAt,
+        spawnedHuge:    h.spawnedHuge,
+      });
+    }
+
     lastMpResultAt = performance.now();
     lastMpHandsCount = trackedHands.length;
   }
@@ -1231,6 +1469,23 @@
         ctx.beginPath();
         ctx.arc(pp.x, pp.y, r, 0, Math.PI * 2);
         ctx.fill();
+
+        // Charging aura — fades in around 2s, intensifies until 5s.
+        // chargeT goes 0..1 across the 5-second hold; visibility starts at
+        // chargeT≈0.4 (≈2s) so the first half feels like a normal pinch.
+        const visibility = Math.max(0, (h.chargeT - 0.3) / 0.7);
+        if (visibility > 0) {
+          const auraR = 30 + 110 * visibility;
+          const auraPulse = 0.7 + 0.3 * Math.sin(now * (0.005 + 0.015 * visibility));
+          const ag = ctx.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, auraR);
+          ag.addColorStop(0,    `rgba(255, 240, 180, ${0.75 * visibility * auraPulse * fade})`);
+          ag.addColorStop(0.45, `rgba(255, 175, 70,  ${0.45 * visibility * auraPulse * fade})`);
+          ag.addColorStop(1,    `rgba(255, 90,  0,   0)`);
+          ctx.fillStyle = ag;
+          ctx.beginPath();
+          ctx.arc(pp.x, pp.y, auraR, 0, Math.PI * 2);
+          ctx.fill();
+        }
       }
     }
     ctx.restore();
@@ -1247,6 +1502,11 @@
         ensureAudio();
         spawnPinchBatch(h.pinchPoint.x, h.pinchPoint.y);
         playPinch();
+      }
+      if (h.hugeTrigger) {
+        h.hugeTrigger = false;
+        ensureAudio();
+        spawnHugeBall(h.pinchPoint.x, h.pinchPoint.y);
       }
     }
   }
@@ -1293,14 +1553,14 @@
         }
         if (hit) {
           s.alive = false;
-          explode(s.x, s.y);
+          explode(s.x, s.y, s.huge ? { huge: true } : undefined);
           continue;
         }
       } else if (mouseFresh) {
         const d = distSegPoint(mouse.prevX, mouse.prevY, mouse.x, mouse.y, s.x, s.y);
         if (d < 46 + s.r) {
           s.alive = false;
-          explode(s.x, s.y);
+          explode(s.x, s.y, s.huge ? { huge: true } : undefined);
         }
       }
     }
@@ -1493,6 +1753,20 @@
     checkCollisions(now);
     processPinches(now);
 
+    // Camera shake — translates the entire canvas drawing for a brief
+    // wobble. The <video> element behind sits in the DOM unaffected, so
+    // only the fireworks + night-sky overlay shake (the webcam stays put).
+    ctx.save();
+    if (shakeRemain > 0) {
+      shakeRemain -= dt;
+      const k = Math.max(0, shakeRemain / shakeDuration);
+      const amp = shakeAmp * k;
+      ctx.translate(
+        (Math.random() - 0.5) * amp * 2,
+        (Math.random() - 0.5) * amp * 2,
+      );
+    }
+
     drawBackground(now);
     for (const l of lanterns) l.draw();
     for (const s of seeds) s.draw(now * 0.001);
@@ -1504,6 +1778,7 @@
     for (const c of chars) c.draw();
     drawFlash(dt);
 
+    ctx.restore();
     requestAnimationFrame(frame);
   }
   requestAnimationFrame((t) => { lastTime = t; frame(t); });
