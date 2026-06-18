@@ -37,6 +37,25 @@
     { r: 255, g: 107, b: 53  }, // orange
     { r: 255, g: 71,  b: 126 }, // pink
   ];
+
+  // Ember palette used by detonations — mostly orange + deep red, occasional
+  // yellow highlight. Drives a "real fire" look rather than rainbow sparks.
+  const EMBER_PALETTE = [
+    { r: 255, g: 222, b: 110, weight: 0.10 }, // yellow highlight
+    { r: 255, g: 175, b:  80, weight: 0.32 }, // bright orange
+    { r: 255, g: 107, b:  53, weight: 0.32 }, // base orange
+    { r: 220, g:  70, b:  30, weight: 0.20 }, // red-orange
+    { r: 212, g:   0, b:   0, weight: 0.06 }, // deep red
+  ];
+  function pickEmber() {
+    const r = Math.random();
+    let acc = 0;
+    for (const c of EMBER_PALETTE) {
+      acc += c.weight;
+      if (r < acc) return c;
+    }
+    return EMBER_PALETTE[2];
+  }
   function paletteAt(t) {
     const len = PALETTE.length;
     const f = ((t % 1) + 1) % 1 * len;
@@ -84,7 +103,7 @@
       this.y = -20 - Math.random() * 80;
       this.vy = 18 + Math.random() * 24; // 18-42 px/s
       this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
-      this.r = 3.5 + Math.random() * 2.5; // core 3.5-6 px → ~7-12 visual
+      this.r = 8 + Math.random() * 4; // core radius 8-12 → ball diameter 16-24
       this.phase = Math.random() * Math.PI * 2;
       this.swayAmp = 6 + Math.random() * 14;
       this.swayFreq = 0.4 + Math.random() * 0.5;
@@ -98,30 +117,69 @@
       if (this.y > H + 40 || this.x < -40 || this.x > W + 40) this.alive = false;
     }
     draw(now) {
-      const pulse = 0.78 + 0.22 * Math.sin((now - this.t0) * 3 + this.phase);
-      const r = this.r * (0.92 + 0.18 * pulse);
+      const t = now - this.t0;
+      const pulse = 0.88 + 0.12 * Math.sin(t * 3 + this.phase);
+      const r = this.r * (0.96 + 0.06 * pulse);
       const c = this.color;
+      const x = this.x, y = this.y;
 
-      // Soft halo
-      const haloR = r * 5.5;
-      const grad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, haloR);
-      grad.addColorStop(0,    rgba(c, 0.55 * pulse));
-      grad.addColorStop(0.25, rgba(c, 0.28 * pulse));
-      grad.addColorStop(1,    rgba(c, 0));
-      ctx.fillStyle = grad;
+      // Soft cast shadow beneath the ball (flattened ellipse, normal alpha)
+      const sy = y + r * 0.7;
+      const sg = ctx.createRadialGradient(x, sy, 0, x, sy, r * 1.45);
+      sg.addColorStop(0, 'rgba(0, 0, 0, 0.32)');
+      sg.addColorStop(1, 'rgba(0, 0, 0, 0)');
+      ctx.fillStyle = sg;
       ctx.beginPath();
-      ctx.arc(this.x, this.y, haloR, 0, Math.PI * 2);
+      ctx.ellipse(x, sy, r * 1.45, r * 0.5, 0, 0, Math.PI * 2);
       ctx.fill();
 
-      // Bright core (color → white)
-      const coreGrad = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, r);
-      coreGrad.addColorStop(0, `rgba(255,255,240,${0.95 * pulse})`);
-      coreGrad.addColorStop(0.55, rgba(c, 0.9));
-      coreGrad.addColorStop(1, rgba(c, 0.25));
-      ctx.fillStyle = coreGrad;
+      // Warm outer halo (additive so colors stack with sky)
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const haloR = r * 2.6;
+      const hg = ctx.createRadialGradient(x, y, r * 0.7, x, y, haloR);
+      hg.addColorStop(0,   rgba(c, 0.55 * pulse));
+      hg.addColorStop(0.4, rgba(c, 0.22 * pulse));
+      hg.addColorStop(1,   rgba(c, 0));
+      ctx.fillStyle = hg;
       ctx.beginPath();
-      ctx.arc(this.x, this.y, r, 0, Math.PI * 2);
+      ctx.arc(x, y, haloR, 0, Math.PI * 2);
       ctx.fill();
+      ctx.restore();
+
+      // Sphere body — radial gradient centered up-left for 3D shading
+      const lightX = x - r * 0.42;
+      const lightY = y - r * 0.42;
+      const dark   = { r: c.r * 0.22, g: c.g * 0.22, b: c.b * 0.22 };
+      const bright = {
+        r: Math.min(255, c.r + 100),
+        g: Math.min(255, c.g + 100),
+        b: Math.min(255, c.b + 100),
+      };
+      const bg = ctx.createRadialGradient(lightX, lightY, 0, x, y, r * 1.18);
+      bg.addColorStop(0,    'rgba(255, 252, 230, 1)');
+      bg.addColorStop(0.15, rgba(bright, 1));
+      bg.addColorStop(0.6,  rgba(c, 1));
+      bg.addColorStop(1,    rgba(dark, 1));
+      ctx.fillStyle = bg;
+      ctx.beginPath();
+      ctx.arc(x, y, r, 0, Math.PI * 2);
+      ctx.fill();
+
+      // Specular highlight near the light source
+      ctx.save();
+      ctx.globalCompositeOperation = 'lighter';
+      const spx = x - r * 0.42, spy = y - r * 0.48;
+      const spR = r * 0.42;
+      const sph = ctx.createRadialGradient(spx, spy, 0, spx, spy, spR);
+      sph.addColorStop(0,   `rgba(255, 255, 255, ${0.9 * pulse})`);
+      sph.addColorStop(0.5, `rgba(255, 255, 255, ${0.35 * pulse})`);
+      sph.addColorStop(1,   'rgba(255, 255, 255, 0)');
+      ctx.fillStyle = sph;
+      ctx.beginPath();
+      ctx.arc(spx, spy, spR, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.restore();
     }
   }
 
@@ -147,36 +205,36 @@
     if (particlePool.length < 1200) particlePool.push(p);
   }
 
-  function explode(x, y, color) {
-    const count = 70 + Math.floor(Math.random() * 50); // 70-120
+  function explode(x, y /* color unused — fireballs are always ember */) {
+    const count = 90 + Math.floor(Math.random() * 50); // 90-140
     const room = MAX_PARTICLES - particles.length;
     const n = Math.min(count, room);
 
-    // mostly spherical fan-out, some streamer tails
     for (let i = 0; i < n; i++) {
-      const angle = (i / n) * Math.PI * 2 + Math.random() * 0.3;
-      const speed = 90 + Math.random() * 220;
-      const sp = Math.pow(Math.random(), 0.6); // bias outward
+      // Roughly spherical fan-out with a little angular jitter
+      const angle = (i / n) * Math.PI * 2 + Math.random() * 0.35;
+      const sp = Math.pow(Math.random(), 0.55);
+      const speed = 110 + sp * 320; // heavier punch than the original
+      const ember = pickEmber();
       const p = getParticle();
       p.x = x; p.y = y;
       p.trailX = x; p.trailY = y;
-      p.vx = Math.cos(angle) * speed * (0.4 + sp);
-      p.vy = Math.sin(angle) * speed * (0.4 + sp);
-      // color jitter around seed hue
-      p.r = clamp(color.r + (Math.random() - 0.5) * 80, 30, 255);
-      p.g = clamp(color.g + (Math.random() - 0.5) * 80, 30, 255);
-      p.b = clamp(color.b + (Math.random() - 0.5) * 80, 30, 255);
+      p.vx = Math.cos(angle) * speed;
+      p.vy = Math.sin(angle) * speed;
+      p.r = clamp(ember.r + (Math.random() - 0.5) * 25, 80, 255);
+      p.g = clamp(ember.g + (Math.random() - 0.5) * 22, 20, 255);
+      p.b = clamp(ember.b + (Math.random() - 0.5) * 20, 0,  200);
       p.life = 1.0;
-      p.maxLife = 0.9 + Math.random() * 0.5;
-      p.size = 1.1 + Math.random() * 1.8;
-      p.drag = 0.985 + Math.random() * 0.01;
-      p.glow = 0.4 + Math.random() * 0.4;
+      p.maxLife = 0.95 + Math.random() * 0.7;
+      p.size = 1.4 + Math.random() * 2.0;
+      p.drag = 0.978 + Math.random() * 0.012;
+      p.glow = 0.5 + Math.random() * 0.4;
       particles.push(p);
     }
 
-    flashAmt = Math.max(flashAmt, 0.55);
-    flashColor = color;
-    playExplosion(color);
+    spawnSmoke(x, y);
+    spawnFlash();
+    playExplosion();
 
     // Occasional 福/春 drift after explosion
     if (Math.random() < 0.32) spawnChars(x, y);
@@ -232,6 +290,93 @@
       ctx.fill();
     }
     ctx.restore();
+  }
+
+  // -------------------------------------------------------------------------
+  // Smoke puffs — translucent gray clouds that linger after a detonation
+  // -------------------------------------------------------------------------
+  const smoke = [];
+  function spawnSmoke(x, y) {
+    const n = 4 + Math.floor(Math.random() * 4);
+    for (let i = 0; i < n; i++) {
+      smoke.push({
+        x: x + (Math.random() - 0.5) * 24,
+        y: y + (Math.random() - 0.5) * 16,
+        vx: (Math.random() - 0.5) * 22,
+        vy: -22 - Math.random() * 24,
+        life: 1,
+        maxLife: 1.3 + Math.random() * 0.5,
+        r: 14 + Math.random() * 14,
+        growth: 14 + Math.random() * 20,
+        tint: 60 + Math.floor(Math.random() * 30),
+      });
+    }
+  }
+  function updateSmoke(dt) {
+    for (let i = smoke.length - 1; i >= 0; i--) {
+      const s = smoke[i];
+      s.x += s.vx * dt;
+      s.y += s.vy * dt;
+      s.vy += 5 * dt; // a tiny pull so smoke slows its rise
+      s.vx *= 0.96;
+      s.r += s.growth * dt;
+      s.life -= dt / s.maxLife;
+      if (s.life <= 0) smoke.splice(i, 1);
+    }
+  }
+  function drawSmoke() {
+    for (let i = 0; i < smoke.length; i++) {
+      const s = smoke[i];
+      const a = Math.min(1, s.life * 1.4) * 0.32;
+      const grad = ctx.createRadialGradient(s.x, s.y, 0, s.x, s.y, s.r);
+      grad.addColorStop(0,   `rgba(${s.tint},${s.tint},${s.tint + 6},${a})`);
+      grad.addColorStop(0.55,`rgba(${s.tint},${s.tint},${s.tint + 6},${a * 0.45})`);
+      grad.addColorStop(1,   `rgba(${s.tint},${s.tint},${s.tint + 6},0)`);
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.arc(s.x, s.y, s.r, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  // -------------------------------------------------------------------------
+  // Detonation flash — full-screen overlay, hot white → yellow → orange → red
+  // -------------------------------------------------------------------------
+  const flashes = [];
+  const FLASH_DURATION = 0.28;
+  function spawnFlash() {
+    flashes.push({ t: 0 });
+    if (flashes.length > 6) flashes.shift();
+  }
+  function drawFlash(dt) {
+    if (flashes.length === 0) return;
+    let aggR = 0, aggG = 0, aggB = 0, aggA = 0;
+    for (let i = flashes.length - 1; i >= 0; i--) {
+      const f = flashes[i];
+      f.t += dt;
+      if (f.t >= FLASH_DURATION) { flashes.splice(i, 1); continue; }
+      const t = f.t / FLASH_DURATION;
+      const a = Math.pow(1 - t, 1.5) * 0.5;
+      let r, g, b;
+      if (t < 0.16) {
+        // hot white → yellow
+        const k = t / 0.16;
+        r = 255; g = 255 - k * 40; b = 245 - k * 200;
+      } else if (t < 0.5) {
+        // yellow → orange
+        const k = (t - 0.16) / 0.34;
+        r = 255; g = 215 - k * 100; b = 45 - k * 15;
+      } else {
+        // orange → deep red
+        const k = (t - 0.5) / 0.5;
+        r = 255 - k * 55; g = 115 - k * 110; b = 30 - k * 30;
+      }
+      aggR += r * a; aggG += g * a; aggB += b * a; aggA += a;
+    }
+    if (aggA <= 0) return;
+    const cap = Math.min(0.55, aggA);
+    ctx.fillStyle = `rgba(${(aggR/aggA)|0},${(aggG/aggA)|0},${(aggB/aggA)|0},${cap})`;
+    ctx.fillRect(0, 0, W, H);
   }
 
   // -------------------------------------------------------------------------
@@ -370,81 +515,97 @@
     window.addEventListener(ev, ensureAudio, { passive: true })
   );
 
-  function playExplosion(color) {
+  function playExplosion() {
     if (!audioCtx) return;
     const ac = audioCtx;
     const now = ac.currentTime;
 
-    // Boom: sine 110→38 Hz, ~0.3s
-    const boom = ac.createOscillator();
-    const boomGain = ac.createGain();
-    boom.type = 'sine';
-    const startF = 100 + Math.random() * 30;
-    boom.frequency.setValueAtTime(startF, now);
-    boom.frequency.exponentialRampToValueAtTime(38, now + 0.28);
-    boomGain.gain.setValueAtTime(0.0001, now);
-    boomGain.gain.exponentialRampToValueAtTime(0.7, now + 0.012);
-    boomGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.34);
-    boom.connect(boomGain);
-    boomGain.connect(masterGain);
-    boom.start(now);
-    boom.stop(now + 0.38);
+    // 1) Transient — high-passed noise click for instant attack
+    const tDur = 0.025;
+    const tBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * tDur), ac.sampleRate);
+    const tData = tBuf.getChannelData(0);
+    for (let i = 0; i < tData.length; i++) {
+      tData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / tData.length, 2.5);
+    }
+    const trans = ac.createBufferSource();
+    trans.buffer = tBuf;
+    const tFilt = ac.createBiquadFilter();
+    tFilt.type = 'highpass';
+    tFilt.frequency.value = 600;
+    const tGain = ac.createGain();
+    tGain.gain.value = 0.55;
+    trans.connect(tFilt); tFilt.connect(tGain); tGain.connect(masterGain);
+    trans.start(now);
 
-    // Sub-thud (triangle, very low)
+    // 2) Body — sine 85→26 Hz with razor-sharp attack
+    const body = ac.createOscillator();
+    const bodyGain = ac.createGain();
+    body.type = 'sine';
+    body.frequency.setValueAtTime(85 + Math.random() * 12, now);
+    body.frequency.exponentialRampToValueAtTime(26, now + 0.32);
+    bodyGain.gain.setValueAtTime(0.0001, now);
+    bodyGain.gain.exponentialRampToValueAtTime(1.0, now + 0.004); // ~4ms attack
+    bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.42);
+    body.connect(bodyGain); bodyGain.connect(masterGain);
+    body.start(now);
+    body.stop(now + 0.46);
+
+    // 3) Sub — sine 42→16 Hz, the chest-thump octave below the body
     const sub = ac.createOscillator();
     const subGain = ac.createGain();
-    sub.type = 'triangle';
-    sub.frequency.setValueAtTime(56, now);
-    sub.frequency.exponentialRampToValueAtTime(28, now + 0.18);
+    sub.type = 'sine';
+    sub.frequency.setValueAtTime(42, now);
+    sub.frequency.exponentialRampToValueAtTime(16, now + 0.28);
     subGain.gain.setValueAtTime(0.0001, now);
-    subGain.gain.exponentialRampToValueAtTime(0.35, now + 0.01);
-    subGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.22);
-    sub.connect(subGain);
-    subGain.connect(masterGain);
+    subGain.gain.exponentialRampToValueAtTime(0.7, now + 0.006);
+    subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.34);
+    sub.connect(subGain); subGain.connect(masterGain);
     sub.start(now);
-    sub.stop(now + 0.24);
+    sub.stop(now + 0.38);
 
-    // Crackle: noise → bandpass, 0.3s
-    const noiseDur = 0.35;
-    const noiseBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * noiseDur), ac.sampleRate);
-    const data = noiseBuf.getChannelData(0);
-    for (let i = 0; i < data.length; i++) {
-      const env = Math.pow(1 - i / data.length, 1.4);
-      // sprinkle in spike-y pops
-      const spike = Math.random() < 0.04 ? 1.5 : 1.0;
-      data[i] = (Math.random() * 2 - 1) * env * spike;
+    // 4) Low rumble — lowpassed noise to fill out the tail of the boom
+    const rDur = 0.55;
+    const rBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * rDur), ac.sampleRate);
+    const rData = rBuf.getChannelData(0);
+    for (let i = 0; i < rData.length; i++) {
+      rData[i] = (Math.random() * 2 - 1) * Math.pow(1 - i / rData.length, 1.2);
     }
-    const noise = ac.createBufferSource();
-    noise.buffer = noiseBuf;
-    const filter = ac.createBiquadFilter();
-    filter.type = 'bandpass';
-    filter.frequency.value = 2200 + Math.random() * 2200;
-    filter.Q.value = 1.4;
-    const noiseGain = ac.createGain();
-    const startN = now + 0.035;
-    noiseGain.gain.setValueAtTime(0.0001, startN);
-    noiseGain.gain.linearRampToValueAtTime(0.32, startN + 0.02);
-    noiseGain.gain.exponentialRampToValueAtTime(0.0001, startN + 0.32);
-    noise.connect(filter);
-    filter.connect(noiseGain);
-    noiseGain.connect(masterGain);
-    noise.start(startN);
-    noise.stop(startN + 0.36);
+    const rum = ac.createBufferSource();
+    rum.buffer = rBuf;
+    const rFilt = ac.createBiquadFilter();
+    rFilt.type = 'lowpass';
+    rFilt.frequency.value = 180;
+    rFilt.Q.value = 0.7;
+    const rGain = ac.createGain();
+    rGain.gain.setValueAtTime(0.0001, now);
+    rGain.gain.exponentialRampToValueAtTime(0.32, now + 0.01);
+    rGain.gain.exponentialRampToValueAtTime(0.001, now + 0.55);
+    rum.connect(rFilt); rFilt.connect(rGain); rGain.connect(masterGain);
+    rum.start(now);
 
-    // Sparkle tail: a short metallic ping (sine ~2-4 kHz)
-    const ping = ac.createOscillator();
-    const pingGain = ac.createGain();
-    ping.type = 'sine';
-    const pingF = 2400 + Math.random() * 1600;
-    ping.frequency.setValueAtTime(pingF, now + 0.04);
-    ping.frequency.exponentialRampToValueAtTime(pingF * 0.5, now + 0.5);
-    pingGain.gain.setValueAtTime(0.0001, now + 0.04);
-    pingGain.gain.exponentialRampToValueAtTime(0.08, now + 0.06);
-    pingGain.gain.exponentialRampToValueAtTime(0.0001, now + 0.55);
-    ping.connect(pingGain);
-    pingGain.connect(masterGain);
-    ping.start(now + 0.04);
-    ping.stop(now + 0.58);
+    // 5) Crackle — secondary, quieter than before so the boom dominates
+    const cDur = 0.32;
+    const cBuf = ac.createBuffer(1, Math.floor(ac.sampleRate * cDur), ac.sampleRate);
+    const cData = cBuf.getChannelData(0);
+    for (let i = 0; i < cData.length; i++) {
+      const env = Math.pow(1 - i / cData.length, 1.6);
+      const spike = Math.random() < 0.05 ? 1.6 : 1.0;
+      cData[i] = (Math.random() * 2 - 1) * env * spike;
+    }
+    const crack = ac.createBufferSource();
+    crack.buffer = cBuf;
+    const cFilt = ac.createBiquadFilter();
+    cFilt.type = 'bandpass';
+    cFilt.frequency.value = 1500 + Math.random() * 1200;
+    cFilt.Q.value = 1.0;
+    const cGain = ac.createGain();
+    const cStart = now + 0.05;
+    cGain.gain.setValueAtTime(0.0001, cStart);
+    cGain.gain.linearRampToValueAtTime(0.18, cStart + 0.02);
+    cGain.gain.exponentialRampToValueAtTime(0.001, cStart + 0.3);
+    crack.connect(cFilt); cFilt.connect(cGain); cGain.connect(masterGain);
+    crack.start(cStart);
+    crack.stop(cStart + 0.34);
   }
 
   // -------------------------------------------------------------------------
@@ -708,10 +869,7 @@
   // -------------------------------------------------------------------------
   // Main loop
   // -------------------------------------------------------------------------
-  let flashAmt = 0;
-  let flashColor = null;
   let lastTime = performance.now();
-  let lastSeedDecay = 0;
 
   function clamp(v, lo, hi) {
     return v < lo ? lo : v > hi ? hi : v;
@@ -733,6 +891,7 @@
     for (let i = lanterns.length - 1; i >= 0; i--) if (lanterns[i].dead) lanterns.splice(i, 1);
 
     updateParticles(dt);
+    updateSmoke(dt);
 
     for (const c of chars) c.update(dt);
     for (let i = chars.length - 1; i >= 0; i--) if (chars[i].life <= 0) chars.splice(i, 1);
@@ -743,17 +902,11 @@
     drawBackground(now);
     for (const l of lanterns) l.draw();
     for (const s of seeds) s.draw(now * 0.001);
+    drawSmoke();        // smoke sits behind the bright embers
     drawParticles();
     drawCursor(now);
     for (const c of chars) c.draw();
-
-    // flash overlay (decays quickly)
-    if (flashAmt > 0.002 && flashColor) {
-      const tint = flashColor;
-      ctx.fillStyle = `rgba(${Math.min(255, tint.r + 120)|0},${Math.min(255, tint.g + 120)|0},${Math.min(255, tint.b + 120)|0},${flashAmt * 0.35})`;
-      ctx.fillRect(0, 0, W, H);
-      flashAmt *= 0.55;
-    }
+    drawFlash(dt);      // hot white → yellow → orange → red
 
     requestAnimationFrame(frame);
   }
