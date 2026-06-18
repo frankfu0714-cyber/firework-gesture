@@ -127,10 +127,19 @@
   const seeds = [];
 
   class Seed {
-    constructor() {
-      this.x = 30 + Math.random() * (W - 60);
-      this.y = -20 - Math.random() * 80;
-      this.vy = 18 + Math.random() * 24;
+    constructor(opts) {
+      if (opts) {
+        this.x = opts.x;
+        this.y = opts.y;
+        this.initialVx = opts.vx || 0;
+        this.initialVy = opts.vy || 0;
+      } else {
+        this.x = 30 + Math.random() * (W - 60);
+        this.y = -20 - Math.random() * 80;
+        this.initialVx = 0;
+        this.initialVy = 0;
+      }
+      this.targetVy = 18 + Math.random() * 24; // gentle terminal fall
       this.color = PALETTE[Math.floor(Math.random() * PALETTE.length)];
       this.r = 8 + Math.random() * 4; // diameter 16-24
       this.phase = Math.random() * Math.PI * 2;
@@ -140,7 +149,17 @@
       this.alive = true;
     }
     update(dt, now) {
-      this.y += this.vy * dt;
+      // Decay any fling velocity (from a pinch-spawn) so the ball settles
+      // into the gentle terminal fall over roughly a second.
+      if (this.initialVx !== 0 || this.initialVy !== 0) {
+        const decay = Math.pow(0.15, dt); // ~15% retained per second
+        this.initialVx *= decay;
+        this.initialVy *= decay;
+        if (Math.abs(this.initialVx) < 0.3) this.initialVx = 0;
+        if (Math.abs(this.initialVy) < 0.3) this.initialVy = 0;
+      }
+      this.y += (this.initialVy + this.targetVy) * dt;
+      this.x += this.initialVx * dt;
       this.x += Math.cos((now - this.t0) * this.swayFreq + this.phase) * this.swayAmp * dt;
       if (this.y > H + 40 || this.x < -40 || this.x > W + 40) this.alive = false;
     }
@@ -214,6 +233,26 @@
   function spawnSeeds(dt) {
     if (seeds.length < 28 && Math.random() < 2.4 * dt) {
       seeds.push(new Seed());
+    }
+  }
+
+  // A pinch flings out a small handful of seeds from the pinch point.
+  // Rate-limit is enforced by rising-edge pinch detection in onHandResults
+  // (one batch per "release → squeeze" transition).
+  const MAX_SEEDS_TOTAL = 50;
+  function spawnPinchBatch(x, y) {
+    const want = 6 + Math.floor(Math.random() * 7); // 6-12
+    const room = Math.max(0, MAX_SEEDS_TOTAL - seeds.length);
+    const n = Math.min(want, room);
+    for (let i = 0; i < n; i++) {
+      const angle = Math.random() * Math.PI * 2;
+      const speed = 110 + Math.random() * 120;
+      seeds.push(new Seed({
+        x: x + (Math.random() - 0.5) * 18,
+        y: y + (Math.random() - 0.5) * 18,
+        vx: Math.cos(angle) * speed,
+        vy: Math.sin(angle) * speed * 0.7, // less vertical fling — keep it in view
+      }));
     }
   }
 
@@ -832,6 +871,24 @@
     crack.start(cStart); crack.stop(cStart + 0.34);
   }
 
+  // Soft upchirp on pinch — gestural acknowledgement, sub-audible loudness
+  function playPinch() {
+    if (!audioCtx) return;
+    const ac = audioCtx;
+    const now = ac.currentTime;
+    const osc = ac.createOscillator();
+    const gain = ac.createGain();
+    osc.type = 'sine';
+    osc.frequency.setValueAtTime(420, now);
+    osc.frequency.exponentialRampToValueAtTime(820, now + 0.14);
+    gain.gain.setValueAtTime(0.0001, now);
+    gain.gain.exponentialRampToValueAtTime(0.18, now + 0.008);
+    gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+    osc.connect(gain); gain.connect(masterGain);
+    osc.start(now);
+    osc.stop(now + 0.22);
+  }
+
   // -------------------------------------------------------------------------
   // Hand tracking — convex hull of 21 landmarks per detected hand
   // -------------------------------------------------------------------------
@@ -883,19 +940,76 @@
     return inside;
   }
 
+  // Tuning knobs for pose classifier — observable on screen via the hand
+  // outline color (palette = palm, cyan/gold = pinch, dim gray = neutral).
+  const FINGER_EXT_RATIO   = 1.15; // tip-from-palm > base-from-palm * ratio
+  const OPEN_PALM_MIN      = 4;    // fingers extended required for "palm"
+  const PINCH_PALM_FRACTION = 0.40; // pinch if dist(4,8) < this * palmWidth
+  const PINCH_MIN_PX        = 50;  // ...or this many screen pixels
+
   function onHandResults(results) {
+    // Snapshot prior pinch state by hand index so we can detect rising
+    // edges (release → squeeze) for the spawn trigger.
+    const prevPinch = trackedHands.map(h => h.isPinch);
+    const prevCount = trackedHands.length;
+
     trackedHands.length = 0;
     if (results.multiHandLandmarks) {
-      for (const lm of results.multiHandLandmarks) {
+      for (let i = 0; i < results.multiHandLandmarks.length; i++) {
+        const lm = results.multiHandLandmarks[i];
         // Mirror X so the on-screen hull matches the user's mirror view.
         const points = lm.map(p => ({ x: (1 - p.x) * W, y: p.y * H }));
         const hull = inflateHull(convexHull(points), 20);
-        const tips = [4, 8, 12, 16, 20].map(i => points[i]);
+        const tips = [4, 8, 12, 16, 20].map(j => points[j]);
         let px = 0, py = 0;
-        for (const i of [0, 5, 9, 13, 17]) { px += points[i].x; py += points[i].y; }
+        for (const j of [0, 5, 9, 13, 17]) { px += points[j].x; py += points[j].y; }
+        const palm = { x: px / 5, y: py / 5 };
+
+        // Palm width: distance between index MCP (5) and pinky MCP (17).
+        // Used to scale the pinch threshold so close/far hands both work.
+        const palmWidth = Math.hypot(points[5].x - points[17].x,
+                                     points[5].y - points[17].y) || 80;
+
+        // Finger extension: tip farther from palm center than its base
+        // landmark by a small ratio. Pairs: (tip, base) per finger.
+        const pairs = [[4, 2], [8, 6], [12, 10], [16, 14], [20, 18]];
+        let extended = 0;
+        for (const [tipIdx, baseIdx] of pairs) {
+          const tipD  = Math.hypot(points[tipIdx].x - palm.x,  points[tipIdx].y - palm.y);
+          const baseD = Math.hypot(points[baseIdx].x - palm.x, points[baseIdx].y - palm.y);
+          if (tipD > baseD * FINGER_EXT_RATIO) extended++;
+        }
+        const isOpenPalm = extended >= OPEN_PALM_MIN;
+
+        // Pinch: thumb tip and index tip close in screen space.
+        const thumbTip = points[4], indexTip = points[8];
+        const tid = Math.hypot(thumbTip.x - indexTip.x, thumbTip.y - indexTip.y);
+        const pinchThreshold = Math.max(PINCH_MIN_PX, palmWidth * PINCH_PALM_FRACTION);
+        const isPinch = tid < pinchThreshold;
+
+        // Pose classification (pinch wins over palm if both qualify; "other"
+        // covers fist, partial folds, transition frames).
+        let pose = 'other';
+        if (isPinch) pose = 'pinch';
+        else if (isOpenPalm) pose = 'palm';
+
+        // Rising-edge detection. If this slot didn't have a hand last frame
+        // we default wasPinch=true so first-frame presence doesn't trigger
+        // a phantom spawn batch.
+        const wasPinch = i < prevPinch.length ? prevPinch[i] : true;
+        const pinchTrigger = !wasPinch && isPinch;
+
         trackedHands.push({
-          points, hull, tips,
-          palm: { x: px / 5, y: py / 5 },
+          points, hull, tips, palm,
+          palmWidth,
+          extendedCount: extended,
+          isOpenPalm, isPinch,
+          pose,
+          pinchTrigger,
+          pinchPoint: {
+            x: (thumbTip.x + indexTip.x) / 2,
+            y: (thumbTip.y + indexTip.y) / 2,
+          },
         });
       }
     }
@@ -908,14 +1022,42 @@
     const sinceUpdate = now - lastMpResultAt;
     if (sinceUpdate > 1500) return;
     const fade = Math.max(0, 1 - sinceUpdate / 1500);
-    const c = paletteAt(now * 0.00012);
 
     ctx.save();
     ctx.globalCompositeOperation = 'lighter';
     for (const h of trackedHands) {
-      // Very faint hull outline so the user can see the interactive region
+      // Pose drives the visual feedback:
+      //   palm  → palette-cycling color (the "ready to detonate" tone)
+      //   pinch → cyan ↔ gold pulse (acknowledgement of the spawn gesture)
+      //   other → very faint white outline (tracked but not actuating)
+      let color, lineA, palmA, tipA, showTips = true;
+      if (h.pose === 'pinch') {
+        const k = 0.5 + 0.5 * Math.sin(now * 0.006);
+        color = {
+          r: 100 + (255 - 100) * k,
+          g: 220, // both endpoints land near 220
+          b: 255 + (110 - 255) * k,
+        };
+        const pulse = 0.85 + 0.15 * Math.sin(now * 0.012);
+        lineA = 0.42 * pulse;
+        palmA = 0.5  * pulse;
+        tipA  = 0.6  * pulse;
+      } else if (h.pose === 'palm') {
+        color = paletteAt(now * 0.00012);
+        lineA = 0.22;
+        palmA = 0.32;
+        tipA  = 0.45;
+      } else {
+        color = { r: 210, g: 220, b: 235 };
+        lineA = 0.10;
+        palmA = 0.10;
+        tipA  = 0.15;
+        showTips = false;
+      }
+
+      // Hull outline
       if (h.hull.length >= 3) {
-        ctx.strokeStyle = rgba(c, 0.18 * fade);
+        ctx.strokeStyle = rgba(color, lineA * fade);
         ctx.lineWidth = 1.4;
         ctx.lineJoin = 'round';
         ctx.beginPath();
@@ -924,29 +1066,62 @@
         ctx.closePath();
         ctx.stroke();
       }
-      // Soft palm glow
+
+      // Palm center glow
       const pgR = 38;
       const pg = ctx.createRadialGradient(h.palm.x, h.palm.y, 0, h.palm.x, h.palm.y, pgR);
-      pg.addColorStop(0, rgba(c, 0.32 * fade));
-      pg.addColorStop(1, rgba(c, 0));
+      pg.addColorStop(0, rgba(color, palmA * fade));
+      pg.addColorStop(1, rgba(color, 0));
       ctx.fillStyle = pg;
       ctx.beginPath();
       ctx.arc(h.palm.x, h.palm.y, pgR, 0, Math.PI * 2);
       ctx.fill();
-      // Fingertip wisps (small radial gradients)
-      for (const tip of h.tips) {
-        const r = 22;
-        const grad = ctx.createRadialGradient(tip.x, tip.y, 0, tip.x, tip.y, r);
-        grad.addColorStop(0, `rgba(255,255,255,${0.45 * fade})`);
-        grad.addColorStop(0.35, rgba(c, 0.4 * fade));
-        grad.addColorStop(1, rgba(c, 0));
-        ctx.fillStyle = grad;
+
+      // Fingertip wisps
+      if (showTips) {
+        for (const tip of h.tips) {
+          const r = 22;
+          const grad = ctx.createRadialGradient(tip.x, tip.y, 0, tip.x, tip.y, r);
+          grad.addColorStop(0,    `rgba(255, 255, 255, ${tipA * fade})`);
+          grad.addColorStop(0.35, rgba(color, tipA * fade));
+          grad.addColorStop(1,    rgba(color, 0));
+          ctx.fillStyle = grad;
+          ctx.beginPath();
+          ctx.arc(tip.x, tip.y, r, 0, Math.PI * 2);
+          ctx.fill();
+        }
+      }
+
+      // Pinch-point indicator — bright bead where the thumb/index meet
+      if (h.pose === 'pinch') {
+        const pp = h.pinchPoint;
+        const r = 22 + 4 * Math.sin(now * 0.012);
+        const ppg = ctx.createRadialGradient(pp.x, pp.y, 0, pp.x, pp.y, r);
+        ppg.addColorStop(0,    `rgba(255, 245, 210, ${0.85 * fade})`);
+        ppg.addColorStop(0.4,  `rgba(180, 240, 255, ${0.55 * fade})`);
+        ppg.addColorStop(1,    `rgba(180, 240, 255, 0)`);
+        ctx.fillStyle = ppg;
         ctx.beginPath();
-        ctx.arc(tip.x, tip.y, r, 0, Math.PI * 2);
+        ctx.arc(pp.x, pp.y, r, 0, Math.PI * 2);
         ctx.fill();
       }
     }
     ctx.restore();
+  }
+
+  // Rising-edge pinch handler: consume the trigger on the hand object so a
+  // single squeeze yields exactly one batch even across multiple frames.
+  function processPinches(now) {
+    if (trackedHands.length === 0) return;
+    if (now - lastMpResultAt > 600) return;
+    for (const h of trackedHands) {
+      if (h.pinchTrigger) {
+        h.pinchTrigger = false;
+        ensureAudio();
+        spawnPinchBatch(h.pinchPoint.x, h.pinchPoint.y);
+        playPinch();
+      }
+    }
   }
 
   // Mouse fallback — single-point cursor as a fake one-vertex "hull" so
@@ -982,8 +1157,11 @@
       if (!s.alive) continue;
 
       if (mpFresh) {
+        // Only open-palm hands detonate; pinch and neutral poses are inert
+        // for the collision check (pinch is the spawn gesture).
         let hit = false;
         for (const h of trackedHands) {
+          if (h.pose !== 'palm') continue;
           if (pointInPolygon(h.hull, s.x, s.y)) { hit = true; break; }
         }
         if (hit) {
@@ -1185,6 +1363,7 @@
     for (let i = chars.length - 1; i >= 0; i--) if (chars[i].life <= 0) chars.splice(i, 1);
 
     checkCollisions(now);
+    processPinches(now);
 
     drawBackground(now);
     for (const l of lanterns) l.draw();
