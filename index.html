@@ -110,11 +110,126 @@
     80% { opacity: 1; }
     100% { opacity: 0; visibility: hidden; }
   }
+
+  /* Compact control row top-right: help / language / 春 toggle */
+  #controls {
+    position: fixed;
+    top: 18px; right: 18px;
+    display: flex;
+    gap: 8px;
+    z-index: 20;
+  }
+  .ctl {
+    width: 36px; height: 36px;
+    border-radius: 50%;
+    background: rgba(10, 14, 42, 0.55);
+    border: 1px solid rgba(255, 216, 107, 0.25);
+    color: rgba(255, 255, 255, 0.9);
+    font-family: inherit;
+    font-size: 14px;
+    font-weight: 300;
+    line-height: 1;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    cursor: pointer;
+    padding: 0;
+    backdrop-filter: blur(8px);
+    -webkit-backdrop-filter: blur(8px);
+    transition: background 0.18s, border-color 0.18s, opacity 0.18s;
+  }
+  .ctl:hover {
+    background: rgba(10, 14, 42, 0.8);
+    border-color: rgba(255, 216, 107, 0.55);
+  }
+  .ctl:focus { outline: none; border-color: rgba(255, 216, 107, 0.65); }
+  .ctl.off { opacity: 0.35; }
+  #ctl-lang { font-size: 12px; letter-spacing: 0.02em; }
+  #ctl-chars { font-size: 16px; color: #ffd86b; }
+
+  /* Gesture-guide modal */
+  #help-modal {
+    position: fixed; inset: 0;
+    z-index: 60;
+    display: none;
+    align-items: center; justify-content: center;
+    background: rgba(0, 0, 0, 0.55);
+    backdrop-filter: blur(6px);
+    -webkit-backdrop-filter: blur(6px);
+    padding: 16px;
+  }
+  #help-modal.open { display: flex; }
+  #help-modal-panel {
+    background: rgba(20, 24, 56, 0.95);
+    border: 1px solid rgba(255, 216, 107, 0.4);
+    border-radius: 18px;
+    padding: 28px 32px 24px;
+    max-width: 560px;
+    width: 100%;
+    box-shadow: 0 20px 60px rgba(0,0,0,0.6), 0 0 40px rgba(255, 107, 53, 0.18);
+  }
+  #help-modal-panel h2 {
+    font-size: 22px;
+    font-weight: 200;
+    color: #ffd86b;
+    letter-spacing: 0.16em;
+    margin-bottom: 18px;
+    text-align: center;
+  }
+  .help-row {
+    display: grid;
+    grid-template-columns: minmax(140px, 1fr) 2fr;
+    gap: 16px;
+    padding: 14px 0;
+    align-items: center;
+    border-top: 1px solid rgba(255, 255, 255, 0.08);
+  }
+  .help-row:first-of-type { border-top: none; padding-top: 6px; }
+  .help-gesture {
+    font-size: 15px;
+    color: #ffd86b;
+    font-weight: 400;
+  }
+  .help-gesture .emoji {
+    font-size: 22px;
+    margin-right: 8px;
+    vertical-align: middle;
+  }
+  .help-effect {
+    font-size: 13px;
+    color: rgba(255, 255, 255, 0.82);
+    line-height: 1.55;
+  }
+  .help-close {
+    display: block;
+    margin: 22px auto 0;
+    padding: 8px 24px;
+    background: transparent;
+    border: 1px solid rgba(255, 216, 107, 0.4);
+    border-radius: 8px;
+    color: rgba(255, 216, 107, 0.88);
+    cursor: pointer;
+    font-family: inherit;
+    font-size: 12px;
+    letter-spacing: 0.18em;
+    text-transform: uppercase;
+  }
+  .help-close:hover { background: rgba(255, 216, 107, 0.08); }
 </style>
 </head>
 <body>
   <canvas id="canvas"></canvas>
   <video id="video" autoplay muted playsinline></video>
+
+  <div id="controls" aria-label="settings">
+    <button id="ctl-help"  class="ctl" type="button" aria-label="help">?</button>
+    <button id="ctl-lang"  class="ctl" type="button" aria-label="language">EN</button>
+    <button id="ctl-chars" class="ctl" type="button" aria-label="toggle characters">春</button>
+  </div>
+
+  <div id="help-modal" aria-hidden="true">
+    <div id="help-modal-panel" role="dialog" aria-modal="true"></div>
+  </div>
 
   <div id="title-wrap">
     <div class="zh">幫你放煙火</div>

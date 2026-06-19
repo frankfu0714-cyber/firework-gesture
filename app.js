@@ -34,12 +34,53 @@
   resize();
 
   const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || W < 720;
-  hintEl.textContent = isMobile ? hintEl.dataset.mobile : hintEl.dataset.desktop;
+  // hint text is set by applyLang() near the end of init
 
   // Hardware gate: scale huge-burst particle count down on machines that
   // probably can't sustain 60fps at the max. Defaults conservatively to
   // "beefy" when the API isn't available.
   const HAS_BEEFY_CPU = (navigator.hardwareConcurrency || 4) >= 4;
+
+  // ----- i18n + user preferences ------------------------------------------
+  const STRINGS = {
+    en: {
+      title_main:        'Wave to Spark Fireworks',
+      hint_desktop:      'Wave your hand to ignite the sky',
+      hint_mobile:       'Tap to ignite the sky',
+      help_title:        'Gestures',
+      help_close:        'Close',
+      gesture_palm:      'Open palm',
+      gesture_palm_d:    'Swipe through firework balls to detonate them',
+      gesture_pinch:     'Pinch',
+      gesture_pinch_d:   'Spawn 6–12 new firework balls flung from your fingers',
+      gesture_long:      'Pinch + hold 2 seconds',
+      gesture_long_d:    'Charge a HUGE firework ball; detonate it for a massive 三尺玉 burst',
+      gesture_fist:      'Fist or in-between',
+      gesture_fist_d:    'Inert (prevents accidental triggers)',
+    },
+    zh: {
+      title_main:        '揮手點燃煙火',
+      hint_desktop:      '揮揮手點亮夜空',
+      hint_mobile:       '輕觸點亮夜空',
+      help_title:        '手勢',
+      help_close:        '關閉',
+      gesture_palm:      '張開手掌',
+      gesture_palm_d:    '揮手穿過煙火球即可引爆',
+      gesture_pinch:     '捏合手指',
+      gesture_pinch_d:   '從指尖灑出 6–12 顆煙火球',
+      gesture_long:      '捏住兩秒',
+      gesture_long_d:    '蓄能召喚巨型煙火球，引爆成壯麗的三尺玉',
+      gesture_fist:      '握拳或中間姿勢',
+      gesture_fist_d:    '無作用（避免誤觸）',
+    },
+  };
+  const LANG_KEY  = 'fg.lang';
+  const CHARS_KEY = 'fg.chars';
+  const defaultLang = (navigator.language || '').toLowerCase().startsWith('zh') ? 'zh' : 'en';
+  let currentLang   = localStorage.getItem(LANG_KEY) || defaultLang;
+  if (currentLang !== 'en' && currentLang !== 'zh') currentLang = 'en';
+  let charsEnabled  = localStorage.getItem(CHARS_KEY) !== '0';
+  const t = (k) => (STRINGS[currentLang] && STRINGS[currentLang][k]) || STRINGS.en[k] || k;
 
   // -------------------------------------------------------------------------
   // Color palettes
@@ -1010,6 +1051,7 @@
     }
   }
   function spawnChars(x, y) {
+    if (!charsEnabled) return; // user-toggleable via the 春 button
     if (chars.length > 24) return;
     const n = 1 + Math.floor(Math.random() * 2);
     for (let i = 0; i < n; i++) chars.push(new CharParticle(x, y - 18));
@@ -1686,15 +1728,19 @@
 
   if (isMobile) {
     video.style.display = 'none';
+    const insideControl = (el) =>
+      el && el.closest && el.closest('#controls, #help-modal');
     const onTouch = (e) => {
+      if (insideControl(e.target)) return; // don't detonate when tapping UI
       ensureAudio();
-      const t = e.touches ? e.touches[0] : e;
-      if (!t) return;
-      setMouse(t.clientX, t.clientY);
-      explodeNearest(t.clientX, t.clientY);
+      const tp = e.touches ? e.touches[0] : e;
+      if (!tp) return;
+      setMouse(tp.clientX, tp.clientY);
+      explodeNearest(tp.clientX, tp.clientY);
     };
     window.addEventListener('pointerdown', onTouch, { passive: true });
     window.addEventListener('pointermove', (e) => {
+      if (insideControl(e.target)) return;
       if (e.pressure > 0 || e.buttons > 0) setMouse(e.clientX, e.clientY);
     }, { passive: true });
   } else {
@@ -1808,6 +1854,97 @@
     requestAnimationFrame(frame);
   }
   requestAnimationFrame((t) => { lastTime = t; frame(t); });
+
+  // -------------------------------------------------------------------------
+  // UI wiring — help modal, language toggle, 春 toggle
+  // -------------------------------------------------------------------------
+  function applyLang() {
+    const titleEn = document.querySelector('#title-wrap .en');
+    if (titleEn) titleEn.textContent = t('title_main');
+    if (hintEl) hintEl.textContent = isMobile ? t('hint_mobile') : t('hint_desktop');
+    const langBtn = document.getElementById('ctl-lang');
+    if (langBtn) langBtn.textContent = currentLang === 'zh' ? '中' : 'EN';
+    document.documentElement.lang = currentLang === 'zh' ? 'zh-Hant' : 'en';
+    renderHelpModal();
+  }
+
+  function renderHelpModal() {
+    const panel = document.getElementById('help-modal-panel');
+    if (!panel) return;
+    panel.innerHTML = '';
+
+    const h2 = document.createElement('h2');
+    h2.textContent = t('help_title');
+    panel.appendChild(h2);
+
+    const rows = [
+      ['✋', t('gesture_palm'), t('gesture_palm_d')],
+      ['🤏', t('gesture_pinch'), t('gesture_pinch_d')],
+      ['🤏', t('gesture_long'), t('gesture_long_d')],
+      ['✊', t('gesture_fist'), t('gesture_fist_d')],
+    ];
+    for (const [emoji, label, desc] of rows) {
+      const row = document.createElement('div');
+      row.className = 'help-row';
+      const g = document.createElement('div');
+      g.className = 'help-gesture';
+      const em = document.createElement('span');
+      em.className = 'emoji';
+      em.textContent = emoji;
+      g.appendChild(em);
+      g.appendChild(document.createTextNode(label));
+      row.appendChild(g);
+      const ef = document.createElement('div');
+      ef.className = 'help-effect';
+      ef.textContent = desc;
+      row.appendChild(ef);
+      panel.appendChild(row);
+    }
+
+    const closeBtn = document.createElement('button');
+    closeBtn.className = 'help-close';
+    closeBtn.type = 'button';
+    closeBtn.textContent = t('help_close');
+    panel.appendChild(closeBtn);
+  }
+
+  const helpModalEl = document.getElementById('help-modal');
+  function openHelp() { helpModalEl && helpModalEl.classList.add('open'); }
+  function closeHelp() { helpModalEl && helpModalEl.classList.remove('open'); }
+
+  function setLang(lang) {
+    currentLang = (lang === 'zh') ? 'zh' : 'en';
+    try { localStorage.setItem(LANG_KEY, currentLang); } catch (e) {}
+    applyLang();
+  }
+  function toggleLang() { setLang(currentLang === 'zh' ? 'en' : 'zh'); }
+
+  function setCharsEnabled(on) {
+    charsEnabled = !!on;
+    try { localStorage.setItem(CHARS_KEY, charsEnabled ? '1' : '0'); } catch (e) {}
+    const btn = document.getElementById('ctl-chars');
+    if (btn) btn.classList.toggle('off', !charsEnabled);
+  }
+  function toggleCharsEnabled() { setCharsEnabled(!charsEnabled); }
+
+  document.getElementById('ctl-help').addEventListener('click', openHelp);
+  document.getElementById('ctl-lang').addEventListener('click', toggleLang);
+  document.getElementById('ctl-chars').addEventListener('click', toggleCharsEnabled);
+
+  // Close modal by clicking the backdrop or the Close button
+  if (helpModalEl) {
+    helpModalEl.addEventListener('click', (e) => {
+      if (e.target === helpModalEl) { closeHelp(); return; }
+      if (e.target instanceof Element && e.target.classList.contains('help-close')) closeHelp();
+    });
+  }
+  document.addEventListener('keydown', (e) => {
+    if (e.key === 'Escape') closeHelp();
+  });
+
+  // Initial UI state
+  applyLang();
+  setCharsEnabled(charsEnabled);
 
   // -------------------------------------------------------------------------
   // Welcoming bursts so the sky is alive before the user does anything
