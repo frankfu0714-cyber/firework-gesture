@@ -36,6 +36,11 @@
   const isMobile = /Mobi|Android|iPhone|iPad|iPod/i.test(navigator.userAgent) || W < 720;
   hintEl.textContent = isMobile ? hintEl.dataset.mobile : hintEl.dataset.desktop;
 
+  // Hardware gate: scale huge-burst particle count down on machines that
+  // probably can't sustain 60fps at the max. Defaults conservatively to
+  // "beefy" when the API isn't available.
+  const HAS_BEEFY_CPU = (navigator.hardwareConcurrency || 4) >= 4;
+
   // -------------------------------------------------------------------------
   // Color palettes
   // -------------------------------------------------------------------------
@@ -146,7 +151,7 @@
       this.color = huge
         ? { r: 255, g: 210, b: 100 } // warm gold
         : PALETTE[Math.floor(Math.random() * PALETTE.length)];
-      this.r = huge ? 30 + Math.random() * 10 : 8 + Math.random() * 4;
+      this.r = huge ? 42 + Math.random() * 10 : 8 + Math.random() * 4; // huge diameter 84-104
       this.phase = Math.random() * Math.PI * 2;
       this.swayAmp = huge ? 3 + Math.random() * 3 : 6 + Math.random() * 14;
       this.swayFreq = 0.4 + Math.random() * 0.5;
@@ -210,7 +215,7 @@
         ctx.rotate(this.haloRotation);
         const rayCount = 12;
         const innerR = r * 1.4;
-        const outerR = r * 2.4;
+        const outerR = r * 3.0; // longer rays so the bigger sphere reads as massive
         for (let i = 0; i < rayCount; i++) {
           const a = (i / rayCount) * Math.PI * 2;
           const ix = Math.cos(a) * innerR;
@@ -358,15 +363,19 @@
   // counts and speeds scale up for the long-pinch detonation.
   function spawnChrysanthemum(x, y, opts) {
     const huge = !!(opts && opts.huge);
+    // Huge counts: beefy CPUs get 600-900, lower-core gets 450-600 (the
+     // gate is navigator.hardwareConcurrency >= 4 — defaults beefy).
     const want = huge
-      ? 360 + Math.floor(Math.random() * 140) // 360-500
+      ? (HAS_BEEFY_CPU
+          ? 600 + Math.floor(Math.random() * 300) // 600-900
+          : 450 + Math.floor(Math.random() * 150)) // 450-600
       : 95  + Math.floor(Math.random() * 35);
     const n = want; // cap enforced lazily in updateParticles, not here
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.35;
       const sp = Math.pow(Math.random(), 0.45);
-      const speed = huge ? 220 + sp * 450 : 130 + sp * 280;
+      const speed = huge ? 260 + sp * 640 : 130 + sp * 280; // huge peak ~900 px/s
       const c = jitter(base, 35);
       const p = getParticle();
       p.x = x; p.y = y; p.trailX = x; p.trailY = y;
@@ -374,7 +383,7 @@
       p.vy = Math.sin(angle) * speed;
       p.r = c.r; p.g = c.g; p.b = c.b;
       p.life = 1.0;
-      p.maxLife = huge ? 1.7 + Math.random() * 0.9 : 1.3 + Math.random() * 0.6;
+      p.maxLife = huge ? 2.2 + Math.random() * 1.2 : 1.3 + Math.random() * 0.6; // huge lingers
       p.size = huge ? 2.1 + Math.random() * 2.0 : 1.5 + Math.random() * 1.8;
       p.drag = 0.978 + Math.random() * 0.012;
       p.glow = (huge ? 0.7 : 0.55) + Math.random() * 0.35;
@@ -390,14 +399,16 @@
   function spawnPeony(x, y, opts) {
     const huge = !!(opts && opts.huge);
     const want = huge
-      ? 380 + Math.floor(Math.random() * 140) // 380-520
+      ? (HAS_BEEFY_CPU
+          ? 620 + Math.floor(Math.random() * 280) // 620-900
+          : 480 + Math.floor(Math.random() * 120)) // 480-600
       : 110 + Math.floor(Math.random() * 40);
     const n = want; // cap enforced lazily in updateParticles, not here
     const base = pickFrom(PAL_REDGOLD);
     for (let i = 0; i < n; i++) {
       const angle = (i / n) * Math.PI * 2 + Math.random() * 0.25;
       const sp = Math.pow(Math.random(), 0.55);
-      const speed = huge ? 240 + sp * 480 : 150 + sp * 320;
+      const speed = huge ? 280 + sp * 620 : 150 + sp * 320; // huge peak ~900 px/s
       const c = jitter(base, 28);
       const p = getParticle();
       p.x = x; p.y = y; p.trailX = x; p.trailY = y;
@@ -405,7 +416,7 @@
       p.vy = Math.sin(angle) * speed;
       p.r = c.r; p.g = c.g; p.b = c.b;
       p.life = 1.0;
-      p.maxLife = huge ? 1.25 + Math.random() * 0.7 : 0.85 + Math.random() * 0.5;
+      p.maxLife = huge ? 1.6 + Math.random() * 0.9 : 0.85 + Math.random() * 0.5; // huge lingers
       p.size = huge ? 2.4 + Math.random() * 2.2 : 1.9 + Math.random() * 2.0;
       p.drag = 0.984 + Math.random() * 0.01;
       p.glow = (huge ? 0.75 : 0.6) + Math.random() * 0.35;
@@ -694,8 +705,8 @@
     // it; the heavy puff was reading as a tonal mismatch.
     if (style !== 'shidare') spawnSmoke(x, y);
     if (huge) {
-      spawnFlash({ duration: 0.5, scale: 1.7 });
-      triggerShake(4.5, 0.32);
+      spawnFlash({ duration: 0.7, scale: 2.2 });
+      triggerShake(7.0, 0.32);
       playHugeExplosion();
     } else {
       spawnFlash();
@@ -887,7 +898,7 @@
     if (aggA <= 0) return;
     // Let big flashes punch through harder — cap scales with the biggest
     // contributing flash (so a huge always lands brighter than a normal one).
-    const cap = Math.min(0.55 * maxScale, 0.72);
+    const cap = Math.min(0.55 * maxScale, 0.85);
     ctx.fillStyle = `rgba(${(aggR/aggA)|0},${(aggG/aggA)|0},${(aggB/aggA)|0},${Math.min(aggA, cap)})`;
     ctx.fillRect(0, 0, W, H);
   }
@@ -1127,24 +1138,25 @@
     trans.connect(tFilt); tFilt.connect(tGain); tGain.connect(masterGain);
     trans.start(now);
 
-    // Deeper body
+    // Deeper body (+20% gain — compressor (threshold -14 dB, ratio 8) tames
+    // peaks so the perceived loudness rises without clipping on laptops).
     const body = ac.createOscillator(); const bodyGain = ac.createGain();
     body.type = 'sine';
     body.frequency.setValueAtTime(65 + Math.random() * 10, now);
     body.frequency.exponentialRampToValueAtTime(18, now + 0.55);
     bodyGain.gain.setValueAtTime(0.0001, now);
-    bodyGain.gain.exponentialRampToValueAtTime(1.0, now + 0.006);
+    bodyGain.gain.exponentialRampToValueAtTime(1.2, now + 0.006);
     bodyGain.gain.exponentialRampToValueAtTime(0.001, now + 0.7);
     body.connect(bodyGain); bodyGain.connect(masterGain);
     body.start(now); body.stop(now + 0.75);
 
-    // Huge sub
+    // Huge sub (+20% to match)
     const sub = ac.createOscillator(); const subGain = ac.createGain();
     sub.type = 'sine';
     sub.frequency.setValueAtTime(32, now);
     sub.frequency.exponentialRampToValueAtTime(10, now + 0.4);
     subGain.gain.setValueAtTime(0.0001, now);
-    subGain.gain.exponentialRampToValueAtTime(0.9, now + 0.008);
+    subGain.gain.exponentialRampToValueAtTime(1.08, now + 0.008);
     subGain.gain.exponentialRampToValueAtTime(0.001, now + 0.5);
     sub.connect(subGain); subGain.connect(masterGain);
     sub.start(now); sub.stop(now + 0.55);
